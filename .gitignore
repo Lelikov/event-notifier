@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.DS_Store
+.idea/
+.venv/
+
+# Added by code-review-graph
+.code-review-graph/
