@@ -8,11 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 uv sync                      # install deps
 uv run pytest                # run all tests
 uv run pytest tests/application/   # run a specific test directory
-uv run pytest tests/application/test_dispatch_notification.py::test_dispatches_to_all_resolved_channels  # single test
+uv run pytest tests/application/test_process_domain_event.py::test_writes_outbox_records_for_all_contacts  # single test
 ruff check --fix .           # lint
 ruff format .                # format
 pre-commit run --all-files   # all hooks
 uvicorn event_notifier.main:app --reload  # run locally
+uv run alembic upgrade head  # apply migrations
+uv run alembic revision --autogenerate -m "description"  # generate migration
 ```
 
 ## Architecture
@@ -23,39 +25,53 @@ This service is a **notification dispatcher**: it consumes `notification.send_re
 
 ```
 RabbitMQ queue: events.notification.commands
-        │ (CloudEvent: notification.send_requested)
+        │ (CloudEvent: booking.created / booking.cancelled / …)
         ▼
 NotificationConsumer (adapters/consumer.py)
-  – parses CloudEvent, extracts NotificationCommand
+  – parses CloudEvent, validates event_type against DOMAIN_EVENT_TO_TRIGGER
+  – constructs DomainEvent frozen dataclass
         │
         ▼
-DispatchNotificationUseCase (application/use_cases/dispatch_notification.py)
-  – for each recipient.email → UsersClient.get_contacts_by_email()
-  – for each ChannelContact → INotificationChannel.send()
-  – for each result → ResultEventPublisher.publish_delivery_result()
+ProcessDomainEventUseCase (application/use_cases/process_domain_event.py)
+  – idempotency check via processed_events table
+  – loads routing_rules from DB → extracts (user_id, role) pairs
+  – per recipient: UsersClient.get_contacts_by_id() → list[ChannelContact]
+  – writes outbox records + marks processed atomically
         │
-        ├──► EmailChannel   → UniSender Go API (template_code from _TEMPLATE_MAP)
-        ├──► TelegramChannel → Bot API /sendMessage (hardcoded message strings)
+        ▼
+notification_outbox table (PostgreSQL)
+        │ (poll every 1s)
+        ▼
+OutboxSender (adapters/outbox_sender.py)
+  – fetch pending, resolve channel adapter, call channel.send()
+        │
+        ├──► EmailChannel   → UniSender Go API (TriggerEvent → template_id)
+        ├──► TelegramChannel → Bot API /sendMessage (TriggerEvent → message text)
         └──► (PushChannel   – wired but commented out pending FCM credentials)
 ```
 
-**Key design principle**: The consumer receives recipients as `{email, role}` tuples. The use case calls `UsersClient` to look up all channel contacts for that email — always including email itself, plus any telegram/push contacts from `event-users`. This fan-out happens per recipient.
+**Key design principle**: The consumer maps CloudEvent `type` to a `TriggerEvent` enum (from `event-schemas`). Routing rules in the DB extract recipient UUIDs using dot-notation paths into event data. The use case calls `UsersClient` to resolve channel contacts per recipient, then writes delivery tasks to the transactional outbox.
 
 ### Layer Map
 
 | Layer | Path | Responsibility |
 |---|---|---|
-| Entry point | `main.py` | FastAPI app + lifespan: starts consumer, `/health` endpoint |
-| DI | `ioc.py` | Dishka `AppProvider` — all wiring at `Scope.APP` |
-| Config | `config.py` | `pydantic-settings`, env prefix-less (no `NOTIFY_` prefix), `.env` file |
-| Domain models | `domain/models/notification.py` | Frozen dataclasses: `NotificationCommand`, `ChannelContact`, `DeliveryResult` |
-| Use case | `application/use_cases/dispatch_notification.py` | Orchestrates fan-out; catches exceptions per-channel |
-| Consumer | `adapters/consumer.py` | FastStream `RabbitBroker`, `declare=False` (queue must pre-exist) |
-| Interfaces | `interfaces/` | `INotificationChannel`, `IUsersClient`, `IResultEventPublisher` protocols |
-| Channels | `infrastructure/channels/` | `EmailChannel` (UniSender Go), `TelegramChannel` |
-| Users client | `infrastructure/users_client.py` | GET `/api/users?email=&role=&limit=1` on `event-users` |
-| Publisher | `infrastructure/publisher.py` | POST `/event/cloudevents` on `event-receiver` (CloudEvents binary mode) |
-| Event types | `event_types.py` | String constants for CloudEvent `type` field |
+| Entry point | `main.py` | FastAPI app + lifespan: starts consumer, outbox sender, `/health` endpoint |
+| DI | `ioc.py` | Dishka `AppProvider` — SQLAlchemy engine/session, channels, use case wiring |
+| Config | `config.py` | `pydantic-settings`, `.env` file, `DATABASE_URL` as `postgresql+asyncpg://` |
+| DB base | `db/base.py` | SQLAlchemy `DeclarativeBase` |
+| DB models | `db/models.py` | ORM models for Alembic migrations (not used for queries) |
+| DB repository | `db/repository.py` | `NotificationRepository` — `text()` SQL queries via `SqlExecutor` |
+| SQL executor | `adapters/sql.py` | `SqlExecutor` — thin wrapper over `AsyncSession` (fetch_one/fetch_all/execute) |
+| Domain models | `domain/models/notification.py` | Frozen dataclasses: `DomainEvent`, `RoutingRule`, `OutboxRecord`, `ChannelContact`, `DeliveryResult`, `ChannelType` |
+| Domain routing | `domain/services/routing.py` | `apply_routing_rules`, `extract_field_value` — pure functions |
+| Use case | `application/use_cases/process_domain_event.py` | Orchestrates routing → contact resolution → outbox write |
+| Consumer | `adapters/consumer.py` | FastStream `RabbitBroker`, CloudEvent parsing, event type filtering |
+| Outbox sender | `adapters/outbox_sender.py` | Background polling + delivery + retry logic |
+| Interfaces | `interfaces/` | `INotificationChannel`, `IUsersClient`, `ISqlExecutor` protocols |
+| Channels | `infrastructure/channels/` | `EmailChannel` (UniSender Go), `TelegramChannel`, `PushChannel` (disabled) |
+| Users client | `infrastructure/users_client.py` | GET `/users/{user_id}` on `event-users` |
+| Event types | `event_types.py` | `DOMAIN_EVENT_TO_TRIGGER` mapping (`EventType` → `TriggerEvent` from event-schemas) |
 
 ### Adding a New Channel
 
@@ -66,7 +82,7 @@ DispatchNotificationUseCase (application/use_cases/dispatch_notification.py)
 
 ### Template Mapping
 
-`trigger_event` is a string like `"BOOKING_CREATED"` passed in the CloudEvent payload. Each channel maintains its own `_TEMPLATE_MAP` / `_MESSAGE_TEMPLATES` dict mapping these strings to provider-specific template codes or message bodies. Unknown `trigger_event` values return a `DeliveryResult(success=False)`.
+`trigger_event` is a `TriggerEvent` enum value (from `event-schemas`) like `TriggerEvent.BOOKING_CREATED`. Each channel maintains its own `_TEMPLATE_MAP` / `_MESSAGE_TEMPLATES` dict mapping `TriggerEvent` enum keys to provider-specific template codes or message bodies. Unknown `trigger_event` values return a `DeliveryResult(success=False)`.
 
 ### External Dependencies
 
@@ -80,19 +96,18 @@ DispatchNotificationUseCase (application/use_cases/dispatch_notification.py)
 ### Required Environment Variables
 
 ```
-RABBIT_URL                  # amqp://...
+DATABASE_URL                # postgresql+asyncpg://user:pass@host/db (required)
+RABBIT_URL                  # amqp://... (default: amqp://guest:guest@localhost:5672/)
 RABBIT_EXCHANGE             # default: "events"
-NOTIFICATION_COMMANDS_QUEUE # default: "events.notification.commands"
-EVENT_RECEIVER_URL          # required
-EVENT_RECEIVER_JWT          # required
+NOTIFICATIONS_QUEUE         # default: "events.notification.commands"
 EVENT_USERS_URL             # required
 EVENT_USERS_TOKEN           # required
 UNISENDER_API_KEY           # required
 UNISENDER_FROM_EMAIL        # required
 UNISENDER_FROM_NAME         # default: "Notifications"
 TELEGRAM_BOT_TOKEN          # required
-FCM_PROJECT_ID              # required (even though PushChannel is currently disabled)
-FCM_SERVICE_ACCOUNT_JSON    # required (even though PushChannel is currently disabled)
+FCM_PROJECT_ID              # optional (PushChannel disabled)
+FCM_SERVICE_ACCOUNT_JSON    # optional (PushChannel disabled)
 ```
 
 ### Test Approach

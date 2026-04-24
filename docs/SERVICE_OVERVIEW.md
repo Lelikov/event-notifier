@@ -51,17 +51,28 @@ OutboxSender                               (adapters/outbox_sender.py:20-127)
         +---> (PushChannel    -- wired but disabled; FCM credentials optional)
 ```
 
+## Database
+
+Schema is managed by **Alembic** with async migrations. ORM models (`db/models.py`) exist only for
+Alembic autogenerate — all queries use raw SQL via `SqlExecutor` (`adapters/sql.py`), a thin
+wrapper over SQLAlchemy `AsyncSession` with `text()` queries (same pattern as event-saver).
+
+Tables: `routing_rules`, `processed_events`, `notification_outbox`.
+
 ## Channels
 
 | Channel | Provider | Template mechanism | Reference |
 |---------|----------|--------------------|-----------|
-| Email | UniSender Go transactional API | `_TEMPLATE_MAP` maps trigger_event to UniSender template_id | `infrastructure/channels/email.py:13-20` |
-| Telegram | Telegram Bot API `/sendMessage` | `_MESSAGE_TEMPLATES` maps trigger_event to hardcoded Russian strings | `infrastructure/channels/telegram.py:12-19` |
-| Push (disabled) | FCM HTTP v1 | `_PUSH_TITLES` maps trigger_event to title strings; body from template_data | `infrastructure/channels/push.py:12-18` |
+| Email | UniSender Go transactional API | `_TEMPLATE_MAP` maps `TriggerEvent` enum → UniSender template_id | `infrastructure/channels/email.py` |
+| Telegram | Telegram Bot API `/sendMessage` | `_MESSAGE_TEMPLATES` maps `TriggerEvent` enum → Russian strings | `infrastructure/channels/telegram.py` |
+| Push (disabled) | FCM HTTP v1 | `_PUSH_TITLES` maps `TriggerEvent` enum → title strings | `infrastructure/channels/push.py` |
+
+Template map keys use `TriggerEvent` enum from `event-schemas` (not raw strings).
+Recipient roles use `RecipientRole` convention from `event-schemas`: `"organizer"` and `"client"`.
 
 ## Template Mapping
 
-The consumer maps CloudEvent `type` to a `trigger_event` string via `DOMAIN_EVENT_TO_TRIGGER` (`event_types.py:9-15`):
+The consumer maps CloudEvent `type` to a `TriggerEvent` enum via `DOMAIN_EVENT_TO_TRIGGER` (`event_types.py`):
 
 | CloudEvent type | trigger_event |
 |-----------------|---------------|
@@ -78,7 +89,7 @@ Email and Telegram templates also contain `BOOKING_REJECTED` which is currently 
 ## Adding a New Channel (step-by-step)
 
 1. **Define the ChannelType** -- add an enum value to `ChannelType` in `domain/models/notification.py:8-11` (if not already present).
-2. **Implement the channel** -- create `infrastructure/channels/<name>.py` implementing `INotificationChannel` protocol (`interfaces/channels.py:6-13`). The `send()` method receives a `ChannelContact`, `trigger_event` string, and `template_data` dict; returns a `DeliveryResult`.
+2. **Implement the channel** -- create `infrastructure/channels/<name>.py` implementing `INotificationChannel` protocol (`interfaces/channels.py`). The `send()` method receives a `ChannelContact`, `trigger_event: TriggerEvent`, and `template_data` dict; returns a `DeliveryResult`.
 3. **Register in DI** -- add a `provide_<name>_channel` method in `ioc.py` and inject it into `provide_outbox_sender`'s `channels` dict.
 4. **Update UsersClient** -- ensure `get_contacts_by_id` (`infrastructure/users_client.py:71-121`) returns `ChannelContact` entries for the new channel type (may require extending event-users' response).
 5. **Add templates** -- populate the channel's internal template map for each trigger_event string.
