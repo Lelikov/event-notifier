@@ -16,7 +16,7 @@ def mock_repository():
     repo = MagicMock()
     repo.get_routing_rules = AsyncMock(
         return_value=[
-            RoutingRule(event_type="booking.created", recipient_field="volunteer_id", recipient_role="volunteer"),
+            RoutingRule(event_type="booking.created", recipient_field="organizer_id", recipient_role="organizer"),
             RoutingRule(event_type="booking.created", recipient_field="client_id", recipient_role="client"),
         ]
     )
@@ -44,7 +44,7 @@ def event():
         event_type="booking.created",
         source="booking",
         booking_id="booking-abc",
-        data={"volunteer_id": "uuid-vol-001", "client_id": "uuid-cli-001"},
+        data={"organizer_id": "uuid-org-001", "client_id": "uuid-cli-001"},
     )
 
 
@@ -91,5 +91,5 @@ async def test_idempotency_key_format(mock_repository, mock_users_client, event)
     records = call_kwargs["records"]
     keys = [r["idempotency_key"] for r in records]
     # format: "{event_id}:{user_id}:{channel}"
-    assert any("evt-001:uuid-vol-001:email" == k for k in keys)
-    assert any("evt-001:uuid-vol-001:telegram" == k for k in keys)
+    assert any("evt-001:uuid-org-001:email" == k for k in keys)
+    assert any("evt-001:uuid-org-001:telegram" == k for k in keys)

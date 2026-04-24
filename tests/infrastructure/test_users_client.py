@@ -80,7 +80,7 @@ async def test_get_contacts_by_id_returns_email_and_telegram(http_client):
                 200,
                 json={
                     "id": user_id,
-                    "role": "volunteer",
+                    "role": "organizer",
                     "first_name": "Ivan",
                     "last_name": "Petrov",
                     "email": "ivan@example.com",
@@ -90,7 +90,7 @@ async def test_get_contacts_by_id_returns_email_and_telegram(http_client):
         )
 
         client = UsersClient(http_client=http_client, api_token="token")
-        contacts = await client.get_contacts_by_id(user_id=user_id, role="volunteer")
+        contacts = await client.get_contacts_by_id(user_id=user_id, role="organizer")
 
     email_contacts = [c for c in contacts if c.channel == ChannelType.EMAIL]
     assert len(email_contacts) == 1

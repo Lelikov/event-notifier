@@ -13,10 +13,10 @@ def make_record(**kwargs) -> OutboxRecord:
         "booking_id": "booking-abc",
         "user_id": "uuid-user-001",
         "recipient_address": "user@example.com",
-        "recipient_role": "volunteer",
+        "recipient_role": "organizer",
         "channel": "email",
         "event_type": "booking.created",
-        "template_context": {"volunteer_id": "uuid-user-001"},
+        "template_context": {"organizer_id": "uuid-user-001"},
         "retry_count": 0,
         "max_retries": 5,
     }
