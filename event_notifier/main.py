@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 from logging import getLevelNamesMapping
 from typing import TYPE_CHECKING
 
-import asyncpg
 import structlog
 from dishka import make_async_container
 from fastapi import FastAPI
@@ -14,7 +13,6 @@ from event_notifier.adapters.consumer import NotificationConsumer
 from event_notifier.adapters.outbox_sender import OutboxSender
 from event_notifier.config import Settings
 from event_notifier.db.repository import NotificationRepository
-from event_notifier.db.schema import create_tables
 from event_notifier.ioc import AppProvider
 from event_notifier.logger import setup_logger
 
@@ -33,11 +31,6 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
     setup_logger(log_level=log_level, console_render=settings.debug)
 
     logger.info("Starting event-notifier", log_level=settings.log_level)
-
-    # Initialize DB schema (idempotent)
-    pool = await container.get(asyncpg.Pool)
-    await create_tables(pool)
-    logger.info("DB schema ready")
 
     # Start RabbitMQ consumer
     consumer = await container.get(NotificationConsumer)
@@ -82,7 +75,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
     await container.close()
 
 
-app = FastAPI(title="event-notifier", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="event-notifier", version="0.3.0", lifespan=lifespan)
 
 
 @app.get("/health")

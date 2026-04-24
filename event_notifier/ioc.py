@@ -2,15 +2,16 @@
 
 from collections.abc import AsyncGenerator
 
-import asyncpg
 import httpx
 import structlog
 from dishka import Provider, Scope, provide
 from faststream.rabbit import ExchangeType, RabbitBroker, RabbitExchange
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from event_notifier.adapters.consumer import NotificationConsumer
 from event_notifier.adapters.outbox_sender import OutboxSender
+from event_notifier.adapters.sql import SqlExecutor
 from event_notifier.application.use_cases.process_domain_event import ProcessDomainEventUseCase
 from event_notifier.config import Settings
 from event_notifier.db.repository import NotificationRepository
@@ -19,6 +20,7 @@ from event_notifier.infrastructure.channels.email import EmailChannel
 from event_notifier.infrastructure.channels.telegram import TelegramChannel
 from event_notifier.infrastructure.users_client import UsersClient
 from event_notifier.interfaces.channels import INotificationChannel
+from event_notifier.interfaces.sql import ISqlExecutor
 
 logger = structlog.get_logger(__name__)
 
@@ -29,14 +31,31 @@ class AppProvider(Provider):
         return Settings()
 
     @provide(scope=Scope.APP)
-    async def provide_db_pool(self, settings: Settings) -> AsyncGenerator[asyncpg.Pool]:
-        pool = await asyncpg.create_pool(str(settings.database_url), min_size=2, max_size=10)
-        yield pool
-        await pool.close()
+    async def provide_sessionmaker(self, settings: Settings) -> AsyncGenerator[async_sessionmaker[AsyncSession]]:
+        engine = create_async_engine(
+            str(settings.database_url),
+            pool_size=10,
+            max_overflow=20,
+            pool_pre_ping=True,
+        )
+        yield async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+        await engine.dispose()
 
     @provide(scope=Scope.APP)
-    def provide_repository(self, pool: asyncpg.Pool) -> NotificationRepository:
-        return NotificationRepository(pool=pool)
+    async def provide_session(
+        self,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> AsyncGenerator[AsyncSession]:
+        async with sessionmaker() as session:
+            yield session
+
+    @provide(scope=Scope.APP)
+    def provide_sql_executor(self, session: AsyncSession) -> ISqlExecutor:
+        return SqlExecutor(session)
+
+    @provide(scope=Scope.APP)
+    def provide_repository(self, sql: ISqlExecutor) -> NotificationRepository:
+        return NotificationRepository(sql=sql)
 
     @provide(scope=Scope.APP)
     def provide_exchange(self, settings: Settings) -> RabbitExchange:
