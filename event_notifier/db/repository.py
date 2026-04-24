@@ -72,7 +72,7 @@ class NotificationRepository:
                     "template_context": json.dumps(rec["template_context"]),
                 },
             )
-        await self._sql.session.commit()
+        await self._sql.commit()
         logger.debug("Outbox written atomically", cloud_event_id=cloud_event_id, count=len(records))
 
     async def fetch_pending_outbox(self, batch_size: int = 10) -> list[OutboxRecord]:
@@ -93,7 +93,7 @@ class NotificationRepository:
             """,
             {"batch_size": batch_size},
         )
-        await self._sql.session.commit()
+        await self._sql.commit()
         return [
             OutboxRecord(
                 id=row["id"],
@@ -116,7 +116,7 @@ class NotificationRepository:
             "UPDATE notification_outbox SET status='delivered', updated_at=NOW() WHERE id=:id::uuid",
             {"id": record_id},
         )
-        await self._sql.session.commit()
+        await self._sql.commit()
 
     async def mark_retry(self, record_id: str, retry_count: int, delay_seconds: int) -> None:
         await self._sql.execute(
@@ -130,14 +130,14 @@ class NotificationRepository:
             """,
             {"id": record_id, "retry_count": retry_count, "delay": str(delay_seconds)},
         )
-        await self._sql.session.commit()
+        await self._sql.commit()
 
     async def mark_failed(self, record_id: str) -> None:
         await self._sql.execute(
             "UPDATE notification_outbox SET status='failed', updated_at=NOW() WHERE id=:id::uuid",
             {"id": record_id},
         )
-        await self._sql.session.commit()
+        await self._sql.commit()
 
     async def cleanup_processed_events(self, days: int = 7) -> None:
         """Delete processed_events older than the specified number of days."""
@@ -145,5 +145,5 @@ class NotificationRepository:
             "DELETE FROM processed_events WHERE processed_at < NOW() - (:days || ' days')::interval",
             {"days": str(days)},
         )
-        await self._sql.session.commit()
+        await self._sql.commit()
         logger.info("Cleaned up processed_events", older_than_days=days)

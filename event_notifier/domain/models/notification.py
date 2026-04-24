@@ -28,7 +28,7 @@ class RoutingRule:
 
     event_type: str
     recipient_field: str  # dot-notation path into DomainEvent.data → extracts UUID string
-    recipient_role: str  # "volunteer" | "client"
+    recipient_role: str  # "organizer" | "client"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +55,7 @@ class ChannelContact:
     channel: ChannelType
     contact_id: str  # email addr / telegram chat_id / FCM device token
     user_id: str  # UUID of the user (from booking event data)
-    role: str  # "volunteer" | "client"
+    role: str  # "organizer" | "client"
 
 
 @dataclass(frozen=True, slots=True)

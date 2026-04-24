@@ -17,3 +17,6 @@ class SqlExecutor:
 
     async def execute(self, query: str, values: dict) -> None:
         await self.session.execute(text(query), values)
+
+    async def commit(self) -> None:
+        await self.session.commit()

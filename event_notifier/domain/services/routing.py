@@ -6,7 +6,7 @@ from event_notifier.domain.models.notification import RoutingRule
 def extract_field_value(data: dict, field_path: str) -> str | None:
     """Extract a string value from a nested dict using dot-notation path.
 
-    Example: extract_field_value({"volunteer_id": "uuid-001"}, "volunteer_id") == "uuid-001"
+    Example: extract_field_value({"organizer_id": "uuid-001"}, "organizer_id") == "uuid-001"
     Example: extract_field_value({"user": {"id": "uuid-001"}}, "user.id") == "uuid-001"
     Returns None if the path doesn't exist or the value is not a string.
     """
