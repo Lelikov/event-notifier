@@ -3,19 +3,20 @@
 from typing import Any
 
 import structlog
+from event_schemas.types import TriggerEvent
 from httpx import AsyncClient, HTTPStatusError
 
 from event_notifier.domain.models.notification import ChannelContact, ChannelType, DeliveryResult
 
 logger = structlog.get_logger(__name__)
 
-_MESSAGE_TEMPLATES: dict[str, str] = {
-    "BOOKING_CREATED": "Новая встреча забронирована.",
-    "BOOKING_CANCELLED": "Встреча отменена.",
-    "BOOKING_RESCHEDULED": "Встреча перенесена.",
-    "BOOKING_REASSIGNED": "Встреча переназначена.",
-    "BOOKING_REMINDER": "Напоминание о встрече.",
-    "BOOKING_REJECTED": "Бронирование отклонено.",
+_MESSAGE_TEMPLATES: dict[TriggerEvent, str] = {
+    TriggerEvent.BOOKING_CREATED: "Новая встреча забронирована.",
+    TriggerEvent.BOOKING_CANCELLED: "Встреча отменена.",
+    TriggerEvent.BOOKING_RESCHEDULED: "Встреча перенесена.",
+    TriggerEvent.BOOKING_REASSIGNED: "Встреча переназначена.",
+    TriggerEvent.BOOKING_REMINDER: "Напоминание о встрече.",
+    TriggerEvent.BOOKING_REJECTED: "Бронирование отклонено.",
 }
 
 
@@ -28,7 +29,7 @@ class TelegramChannel:
         self,
         *,
         contact: ChannelContact,
-        trigger_event: str,
+        trigger_event: TriggerEvent,
         template_data: dict[str, Any],
     ) -> DeliveryResult:
         text = _MESSAGE_TEMPLATES.get(trigger_event, f"Уведомление: {trigger_event}")

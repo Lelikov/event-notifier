@@ -65,7 +65,13 @@ class OutboxSender:
             await self._repository.mark_failed(record.id)
             return
 
-        trigger_event = DOMAIN_EVENT_TO_TRIGGER.get(record.event_type, record.event_type)
+        trigger_event = DOMAIN_EVENT_TO_TRIGGER.get(record.event_type)
+        if trigger_event is None:
+            logger.error(
+                "No trigger_event mapping for event_type, marking failed", event_type=record.event_type, id=record.id
+            )
+            await self._repository.mark_failed(record.id)
+            return
         contact = ChannelContact(
             channel=channel_type,
             contact_id=record.recipient_address,

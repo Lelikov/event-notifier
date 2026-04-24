@@ -3,6 +3,7 @@
 from typing import Any
 
 import structlog
+from event_schemas.types import TriggerEvent
 from httpx import AsyncClient, HTTPStatusError
 
 from event_notifier.domain.models.notification import ChannelContact, ChannelType, DeliveryResult
@@ -10,13 +11,13 @@ from event_notifier.domain.models.notification import ChannelContact, ChannelTyp
 logger = structlog.get_logger(__name__)
 
 # Maps trigger_event → UniSender template code.
-_TEMPLATE_MAP: dict[str, str] = {
-    "BOOKING_CREATED": "booking_created",
-    "BOOKING_CANCELLED": "booking_cancelled",
-    "BOOKING_RESCHEDULED": "booking_rescheduled",
-    "BOOKING_REASSIGNED": "booking_reassigned",
-    "BOOKING_REMINDER": "booking_reminder",
-    "BOOKING_REJECTED": "booking_rejected",
+_TEMPLATE_MAP: dict[TriggerEvent, str] = {
+    TriggerEvent.BOOKING_CREATED: "booking_created",
+    TriggerEvent.BOOKING_CANCELLED: "booking_cancelled",
+    TriggerEvent.BOOKING_RESCHEDULED: "booking_rescheduled",
+    TriggerEvent.BOOKING_REASSIGNED: "booking_reassigned",
+    TriggerEvent.BOOKING_REMINDER: "booking_reminder",
+    TriggerEvent.BOOKING_REJECTED: "booking_rejected",
 }
 
 _UNISENDER_URL = "/ru/transactional/api/v1/email/send.json"
@@ -40,7 +41,7 @@ class EmailChannel:
         self,
         *,
         contact: ChannelContact,
-        trigger_event: str,
+        trigger_event: TriggerEvent,
         template_data: dict[str, Any],
     ) -> DeliveryResult:
         template_code = _TEMPLATE_MAP.get(trigger_event)

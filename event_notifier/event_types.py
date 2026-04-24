@@ -5,7 +5,7 @@ from event_schemas.types import EventType, TriggerEvent
 NOTIFIER_SOURCE = "event-notifier"
 
 # Mapping from CloudEvent type to trigger_event string used by channel adapters
-DOMAIN_EVENT_TO_TRIGGER: dict[str, str] = {
+DOMAIN_EVENT_TO_TRIGGER: dict[str, TriggerEvent] = {
     EventType.BOOKING_CREATED: TriggerEvent.BOOKING_CREATED,
     EventType.BOOKING_CANCELLED: TriggerEvent.BOOKING_CANCELLED,
     EventType.BOOKING_RESCHEDULED: TriggerEvent.BOOKING_RESCHEDULED,

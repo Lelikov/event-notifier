@@ -3,19 +3,20 @@
 from typing import Any, Protocol
 
 import structlog
+from event_schemas.types import TriggerEvent
 from httpx import AsyncClient, HTTPStatusError
 
 from event_notifier.domain.models.notification import ChannelContact, ChannelType, DeliveryResult
 
 logger = structlog.get_logger(__name__)
 
-_PUSH_TITLES: dict[str, str] = {
-    "BOOKING_CREATED": "Новая встреча",
-    "BOOKING_CANCELLED": "Встреча отменена",
-    "BOOKING_RESCHEDULED": "Встреча перенесена",
-    "BOOKING_REASSIGNED": "Встреча переназначена",
-    "BOOKING_REMINDER": "Напоминание",
-    "BOOKING_REJECTED": "Бронирование отклонено",
+_PUSH_TITLES: dict[TriggerEvent, str] = {
+    TriggerEvent.BOOKING_CREATED: "Новая встреча",
+    TriggerEvent.BOOKING_CANCELLED: "Встреча отменена",
+    TriggerEvent.BOOKING_RESCHEDULED: "Встреча перенесена",
+    TriggerEvent.BOOKING_REASSIGNED: "Встреча переназначена",
+    TriggerEvent.BOOKING_REMINDER: "Напоминание",
+    TriggerEvent.BOOKING_REJECTED: "Бронирование отклонено",
 }
 
 
@@ -39,7 +40,7 @@ class PushChannel:
         self,
         *,
         contact: ChannelContact,
-        trigger_event: str,
+        trigger_event: TriggerEvent,
         template_data: dict[str, Any],
     ) -> DeliveryResult:
         title = _PUSH_TITLES.get(trigger_event, "Уведомление")
