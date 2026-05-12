@@ -11,4 +11,8 @@ DOMAIN_EVENT_TO_TRIGGER: dict[str, TriggerEvent] = {
     EventType.BOOKING_RESCHEDULED: TriggerEvent.BOOKING_RESCHEDULED,
     EventType.BOOKING_REASSIGNED: TriggerEvent.BOOKING_REASSIGNED,
     EventType.BOOKING_REMINDER_SENT: TriggerEvent.BOOKING_REMINDER,
+    EventType.BOOKING_REJECTED: TriggerEvent.BOOKING_REJECTED,
 }
+
+# CloudEvent type for direct notification command events (bypasses routing rules)
+NOTIFICATION_COMMAND_EVENT = EventType.NOTIFICATION_SEND_REQUESTED.value

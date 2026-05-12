@@ -6,7 +6,7 @@ from faststream.rabbit import RabbitBroker, RabbitExchange, RabbitQueue
 
 from event_notifier.application.use_cases.process_domain_event import ProcessDomainEventUseCase
 from event_notifier.domain.models.notification import DomainEvent
-from event_notifier.event_types import DOMAIN_EVENT_TO_TRIGGER
+from event_notifier.event_types import DOMAIN_EVENT_TO_TRIGGER, NOTIFICATION_COMMAND_EVENT
 
 logger = structlog.get_logger(__name__)
 
@@ -62,7 +62,7 @@ class NotificationConsumer:
             raise
 
         event_type = ce["type"]
-        if event_type not in DOMAIN_EVENT_TO_TRIGGER:
+        if event_type not in DOMAIN_EVENT_TO_TRIGGER and event_type != NOTIFICATION_COMMAND_EVENT:
             logger.warning("Unknown event type, skipping", event_type=event_type)
             return
 
