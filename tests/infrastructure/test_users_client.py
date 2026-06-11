@@ -1,116 +1,100 @@
+"""Tests for UsersClient against the real event-users route contract."""
+
+import httpx
 import pytest
 import respx
 from httpx import AsyncClient, Response
 
-from event_notifier.domain.models.notification import ChannelType
+from event_notifier.domain.models.notification import UserContacts
 from event_notifier.infrastructure.users_client import UsersClient
+from event_notifier.interfaces.users_client import UsersServiceError
 
 
 @pytest.fixture
-def http_client():
-    return AsyncClient(base_url="http://users-service")
+async def client():
+    async with AsyncClient(base_url="http://users-service") as http_client:
+        yield UsersClient(http_client=http_client, api_token="test-token")
 
 
-@pytest.mark.asyncio
-async def test_get_contacts_by_email_returns_email_and_telegram(http_client):
+def user_response(contacts: list[dict] | None = None) -> dict:
+    return {
+        "id": "uuid-1",
+        "email": "org@example.com",
+        "name": "Org",
+        "role": "organizer",
+        "time_zone": "UTC",
+        "contacts": contacts or [],
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+
+
+async def test_calls_canonical_by_id_route(client):
+    """Regression: the route is /api/users/id/{user_id}, NOT /users/{user_id}."""
     with respx.mock:
-        respx.get("http://users-service/api/users").mock(
+        route = respx.get("http://users-service/api/users/id/uuid-1").mock(
+            return_value=Response(200, json=user_response())
+        )
+
+        contacts = await client.get_user_contacts(user_id="uuid-1")
+
+    assert route.called
+    assert route.calls[0].request.headers["Authorization"] == "Bearer test-token"
+    assert contacts == UserContacts(email="org@example.com", telegram_chat_id=None)
+
+
+async def test_parses_telegram_contact(client):
+    with respx.mock:
+        respx.get("http://users-service/api/users/id/uuid-1").mock(
             return_value=Response(
                 200,
-                json={
-                    "items": [
+                json=user_response(
+                    contacts=[
                         {
-                            "id": "uuid-1",
-                            "email": "org@example.com",
-                            "role": "organizer",
-                            "name": "Org",
-                            "time_zone": "UTC",
-                            "contacts": [
-                                {
-                                    "channel": "telegram",
-                                    "contact_id": "123456789",
-                                    "id": "c1",
-                                    "user_id": "uuid-1",
-                                    "created_at": "2026-01-01T00:00:00Z",
-                                    "updated_at": "2026-01-01T00:00:00Z",
-                                },
-                            ],
+                            "id": "c1",
+                            "user_id": "uuid-1",
+                            "channel": "telegram",
+                            "contact_id": "123456789",
                             "created_at": "2026-01-01T00:00:00Z",
                             "updated_at": "2026-01-01T00:00:00Z",
                         }
                     ]
-                },
+                ),
             )
         )
 
-        client = UsersClient(http_client=http_client, api_token="token")
-        contacts = await client.get_contacts_by_email(email="org@example.com", role="organizer")
+        contacts = await client.get_user_contacts(user_id="uuid-1")
 
-    # Email channel всегда добавляется (primary contact)
-    email_contacts = [c for c in contacts if c.channel == ChannelType.EMAIL]
-    assert len(email_contacts) == 1
-    assert email_contacts[0].contact_id == "org@example.com"
-
-    # Telegram из contacts
-    tg_contacts = [c for c in contacts if c.channel == ChannelType.TELEGRAM]
-    assert len(tg_contacts) == 1
-    assert tg_contacts[0].contact_id == "123456789"
+    assert contacts.telegram_chat_id == "123456789"
 
 
-@pytest.mark.asyncio
-async def test_get_contacts_by_email_user_not_found_returns_email_only(http_client):
+async def test_404_returns_none(client):
     with respx.mock:
-        respx.get("http://users-service/api/users").mock(return_value=Response(200, json={"items": []}))
+        respx.get("http://users-service/api/users/id/gone").mock(return_value=Response(404))
 
-        client = UsersClient(http_client=http_client, api_token="token")
-        contacts = await client.get_contacts_by_email(email="unknown@example.com", role="client")
-
-    # Даже если юзер не найден — email-канал всегда доступен
-    assert len(contacts) == 1
-    assert contacts[0].channel == ChannelType.EMAIL
-    assert contacts[0].contact_id == "unknown@example.com"
+        assert await client.get_user_contacts(user_id="gone") is None
 
 
-@pytest.mark.asyncio
-async def test_get_contacts_by_id_returns_email_and_telegram(http_client):
-    user_id = "550e8400-e29b-41d4-a716-446655440001"
+async def test_5xx_raises_users_service_error(client):
     with respx.mock:
-        respx.get(f"http://users-service/users/{user_id}").mock(
-            return_value=Response(
-                200,
-                json={
-                    "id": user_id,
-                    "role": "organizer",
-                    "first_name": "Ivan",
-                    "last_name": "Petrov",
-                    "email": "ivan@example.com",
-                    "telegram_chat_id": "987654321",
-                },
-            )
-        )
+        respx.get("http://users-service/api/users/id/uuid-1").mock(return_value=Response(503))
 
-        client = UsersClient(http_client=http_client, api_token="token")
-        contacts = await client.get_contacts_by_id(user_id=user_id, role="organizer")
-
-    email_contacts = [c for c in contacts if c.channel == ChannelType.EMAIL]
-    assert len(email_contacts) == 1
-    assert email_contacts[0].contact_id == "ivan@example.com"
-    assert email_contacts[0].user_id == user_id
-
-    tg_contacts = [c for c in contacts if c.channel == ChannelType.TELEGRAM]
-    assert len(tg_contacts) == 1
-    assert tg_contacts[0].contact_id == "987654321"
+        with pytest.raises(UsersServiceError):
+            await client.get_user_contacts(user_id="uuid-1")
 
 
-@pytest.mark.asyncio
-async def test_get_contacts_by_id_user_not_found_returns_empty(http_client):
-    user_id = "unknown-uuid"
+async def test_auth_failure_raises_users_service_error(client):
+    """401/403 means broken config — must be retried/alerted, never treated as 'no user'."""
     with respx.mock:
-        respx.get(f"http://users-service/users/{user_id}").mock(
-            return_value=Response(404, json={"detail": "Not found"})
-        )
+        respx.get("http://users-service/api/users/id/uuid-1").mock(return_value=Response(401))
 
-        client = UsersClient(http_client=http_client, api_token="token")
-        contacts = await client.get_contacts_by_id(user_id=user_id, role="client")
+        with pytest.raises(UsersServiceError):
+            await client.get_user_contacts(user_id="uuid-1")
 
-    assert contacts == []
+
+async def test_timeout_raises_users_service_error(client):
+    with respx.mock:
+        respx.get("http://users-service/api/users/id/uuid-1").mock(side_effect=httpx.ConnectTimeout("timeout"))
+
+        with pytest.raises(UsersServiceError):
+            await client.get_user_contacts(user_id="uuid-1")

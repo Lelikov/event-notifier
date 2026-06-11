@@ -4,14 +4,10 @@ import httpx
 import structlog
 from httpx import AsyncClient
 
-from event_notifier.domain.models.notification import ChannelContact, ChannelType
+from event_notifier.domain.models.notification import UserContacts
+from event_notifier.interfaces.users_client import UsersServiceError
 
 logger = structlog.get_logger(__name__)
-
-_CHANNEL_MAP = {
-    "telegram": ChannelType.TELEGRAM,
-    "push": ChannelType.PUSH,
-}
 
 
 class UsersClient:
@@ -19,103 +15,47 @@ class UsersClient:
         self._client = http_client
         self._headers = {"Authorization": f"Bearer {api_token}"}
 
-    async def get_contacts_by_email(self, *, email: str, role: str) -> list[ChannelContact]:
-        """Resolve all notification contacts for a recipient by email.
+    async def get_user_contacts(self, *, user_id: str) -> UserContacts | None:
+        """GET /api/users/id/{user_id} → UserContacts, or None when the user is gone (404).
 
-        Always includes the email channel. Adds telegram/push if found in user_contacts.
-        Falls back to email-only on any error.
-        """
-        contacts: list[ChannelContact] = [
-            ChannelContact(
-                channel=ChannelType.EMAIL,
-                contact_id=email,
-                user_id=email,  # legacy: use email as user_id when no UUID available
-                role=role,
-            )
-        ]
-
-        try:
-            response = await self._client.get(
-                "/api/users",
-                params={"email": email, "role": role, "limit": 1, "offset": 0},
-                headers=self._headers,
-            )
-            response.raise_for_status()
-            data = response.json()
-        except Exception:
-            logger.warning("Failed to fetch user contacts, email-only fallback", email=email)
-            return contacts
-
-        items = data.get("items", [])
-        if not items:
-            logger.debug("User not found in event-users, email-only", email=email)
-            return contacts
-
-        for raw_contact in items[0].get("contacts", []):
-            channel_str = raw_contact.get("channel", "")
-            channel = _CHANNEL_MAP.get(channel_str)
-            if channel is None:
-                continue
-            contacts.append(
-                ChannelContact(
-                    channel=channel,
-                    contact_id=raw_contact["contact_id"],
-                    user_id=email,  # legacy: use email as user_id when no UUID available
-                    role=role,
-                )
-            )
-
-        logger.debug("Resolved contacts by email", email=email, channel_count=len(contacts))
-        return contacts
-
-    async def get_contacts_by_id(self, *, user_id: str, role: str) -> list[ChannelContact]:
-        """Resolve all notification contacts for a recipient by UUID.
-
-        Calls GET /users/{user_id} on event-users service.
-        Returns email + telegram/push contacts if available.
-        Returns empty list if user not found (404).
-        Raises on 5xx/timeout/connection errors so FastStream can nack and retry.
+        Any non-404 failure raises UsersServiceError: the message must be
+        retried, not ACKed, otherwise the notification is silently lost.
         """
         try:
-            response = await self._client.get(
-                f"/users/{user_id}",
-                headers=self._headers,
+            response = await self._client.get(f"/api/users/id/{user_id}", headers=self._headers)
+        except httpx.HTTPError as exc:
+            logger.error("Transport error fetching user from event-users", user_id=user_id, error=str(exc))
+            raise UsersServiceError(f"event-users request failed for {user_id}: {exc}") from exc
+
+        if response.status_code == 404:
+            logger.warning("User not found in event-users (404)", user_id=user_id)
+            return None
+        if response.status_code >= 400:
+            logger.error(
+                "event-users returned error status",
+                user_id=user_id,
+                status=response.status_code,
             )
-            response.raise_for_status()
-            data = response.json()
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                logger.debug("User not found by id (404)", user_id=user_id)
-                return []
-            logger.error("Server error fetching user profile by id", user_id=user_id, status=exc.response.status_code)
-            raise
-        except (httpx.TimeoutException, httpx.ConnectError) as exc:
-            logger.error("Connection/timeout error fetching user profile by id", user_id=user_id, error=str(exc))
-            raise
+            raise UsersServiceError(f"event-users returned {response.status_code} for {user_id}")
 
-        contacts: list[ChannelContact] = []
-
+        data = response.json()
+        telegram_chat_id = _first_contact(data.get("contacts", []), channel="telegram")
         email = data.get("email")
-        if email and isinstance(email, str):
-            contacts.append(
-                ChannelContact(
-                    channel=ChannelType.EMAIL,
-                    contact_id=email,
-                    user_id=user_id,
-                    role=role,
-                )
-            )
-
-        telegram_chat_id = data.get("telegram_chat_id")
-        if telegram_chat_id and isinstance(telegram_chat_id, str):
-            contacts.append(
-                ChannelContact(
-                    channel=ChannelType.TELEGRAM,
-                    contact_id=telegram_chat_id,
-                    user_id=user_id,
-                    role=role,
-                )
-            )
-
-        logger.debug("Resolved contacts by id", user_id=user_id, channel_count=len(contacts))
+        contacts = UserContacts(
+            email=email if isinstance(email, str) and email else None,
+            telegram_chat_id=telegram_chat_id,
+        )
+        logger.debug("Resolved user contacts", user_id=user_id, has_telegram=bool(telegram_chat_id))
         return contacts
+
+
+def _first_contact(raw_contacts: list, *, channel: str) -> str | None:
+    for raw in raw_contacts:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("channel") != channel:
+            continue
+        contact_id = raw.get("contact_id")
+        if isinstance(contact_id, str) and contact_id:
+            return contact_id
+    return None
