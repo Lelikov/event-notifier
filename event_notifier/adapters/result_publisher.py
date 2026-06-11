@@ -88,7 +88,8 @@ class DeliveryResultPublisher:
         headers = dict(message.headers)
         headers["content-type"] = "application/json"
         if self._api_key:
-            headers["Authorization"] = self._api_key
+            # event-receiver's /event/admin requires the Bearer scheme (audit-v2 follow-up #7).
+            headers["Authorization"] = f"Bearer {self._api_key}"
 
         try:
             response = await self._client.post(self._endpoint_url, headers=headers, content=message.body)

@@ -93,7 +93,7 @@ pending --claim batch (FOR UPDATE SKIP LOCKED -> status='processing')--> channel
 
 After each successful delivery `DeliveryResultPublisher` POSTs a binary-mode
 CloudEvent to `EVENTS_ENDPOINT_URL` (disabled when unset; `EVENTS_API_KEY` goes
-into the `Authorization` header):
+into the `Authorization` header as `Bearer {EVENTS_API_KEY}`):
 
 | Channel | `ce-type` | Extra payload fields |
 |---------|-----------|----------------------|

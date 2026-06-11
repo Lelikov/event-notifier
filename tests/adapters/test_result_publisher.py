@@ -50,7 +50,8 @@ async def test_publishes_binary_cloudevent_for_email(http_client):
     request = route.calls[0].request
     assert request.headers["ce-type"] == "notification.email.message_sent"
     assert request.headers["ce-source"] == "event-notifier"
-    assert request.headers["Authorization"] == "admin-key"
+    # /event/admin requires the Bearer scheme (audit-v2 follow-up #7)
+    assert request.headers["Authorization"] == "Bearer admin-key"
     body = json.loads(request.content)
     assert body["email"] == "user@example.com"
     assert body["job_id"] == "job-42"

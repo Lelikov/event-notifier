@@ -60,7 +60,7 @@
 | Property | Value |
 |----------|-------|
 | Endpoint | `POST {EVENTS_ENDPOINT_URL}` — binary-mode CloudEvent ingest |
-| Auth | `Authorization: {EVENTS_API_KEY}` |
+| Auth | `Authorization: Bearer {EVENTS_API_KEY}` |
 | Purpose | `notification.*.message_sent` delivery results |
 
 **Failure modes:** fire-and-forget — publish failure is logged and swallowed (the
