@@ -1,4 +1,16 @@
-"""RabbitMQ consumer for the events.notification.commands queue."""
+"""RabbitMQ consumer for the events.notification.commands queue.
+
+Ack policy (explicit, exception-driven):
+- CloudEvent parse failure / payload contract violation → RejectMessage
+  (poison, dead-lettered to events.notification.commands.dlq).
+- Transient infrastructure failure (event-users outage, DB connectivity) →
+  in-process retries with backoff, then NackMessage(requeue=True) so the
+  message is redelivered instead of being lost.
+- Anything else unexpected → RejectMessage (poison, visible in the DLQ).
+"""
+
+import asyncio
+from typing import Any
 
 import structlog
 from cloudevents.v1.http import from_http
@@ -6,30 +18,83 @@ from event_schemas.attributes import BOOKING_ID_ATTRIBUTE
 from event_schemas.envelope import EnvelopeParticipant, EventEnvelope
 from event_schemas.notification import NotificationCommandPayload
 from event_schemas.queues import EVENTS_DLX, NOTIFICATION_COMMANDS_QUEUE, QueueSpec
-from faststream.rabbit import ExchangeType, RabbitBroker, RabbitExchange, RabbitQueue
-from pydantic import ValidationError
+from event_schemas.types import EventType
+from faststream import Context
+from faststream.exceptions import NackMessage, RejectMessage
+from faststream.rabbit import Channel, ExchangeType, RabbitBroker, RabbitExchange, RabbitQueue
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as SqlTimeoutError
 
-from event_notifier.application.use_cases.process_domain_event import ProcessDomainEventUseCase
-from event_notifier.domain.models.notification import DomainEvent
-from event_notifier.event_types import DOMAIN_EVENT_TO_TRIGGER, NOTIFICATION_COMMAND_EVENT
+from event_notifier.application.use_cases.process_notification_command import ProcessNotificationCommandUseCase
+from event_notifier.domain.models.notification import CommandRecipient, NotificationCommand
+from event_notifier.interfaces.users_client import UsersServiceError
 
 logger = structlog.get_logger(__name__)
+
+DEFAULT_TRANSIENT_RETRY_ATTEMPTS = 3
+DEFAULT_RETRY_BACKOFF_SECONDS = 0.5
+
+_TRANSIENT_ERROR_TYPES = (
+    UsersServiceError,  # event-users 5xx/auth/transport
+    OperationalError,  # DB connectivity / restart
+    InterfaceError,  # driver-level connection failure
+    SqlTimeoutError,  # connection pool exhaustion
+    OSError,  # network errors (includes ConnectionError)
+    TimeoutError,  # asyncio timeouts
+)
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Classify an exception as retryable infrastructure failure (vs poison message)."""
+    if isinstance(exc, _TRANSIENT_ERROR_TYPES):
+        return True
+    return isinstance(exc, DBAPIError) and exc.connection_invalidated
+
+
+def parse_notification_command(*, headers: dict, body: bytes) -> NotificationCommand | None:
+    """Parse a binary-mode CloudEvent into a NotificationCommand.
+
+    Returns None for event types this service does not handle (logged + ACKed).
+    Raises ValueError/ValidationError for malformed payloads (poison).
+    """
+    ce = from_http(headers=headers, data=body)
+
+    event_type = ce["type"]
+    if event_type != EventType.NOTIFICATION_SEND_REQUESTED.value:
+        logger.warning("Unexpected event type on commands queue, acking", event_type=event_type, event_id=ce["id"])
+        return None
+
+    envelope = EventEnvelope.model_validate(ce.data or {})
+    payload = envelope.parse_payload(NotificationCommandPayload)
+
+    booking_id = ce.get(BOOKING_ID_ATTRIBUTE) or payload.booking_id
+    recipients = _resolve_recipients(payload, envelope.normalized.participants)
+    # D6: template_context = template_data merged over original (never the wrapper)
+    template_context = {**envelope.original, **payload.template_data}
+
+    return NotificationCommand(
+        event_id=ce["id"],
+        booking_id=booking_id,
+        trigger_event=payload.trigger_event.value,
+        recipients=recipients,
+        template_context=template_context,
+    )
 
 
 def _resolve_recipients(
     payload: NotificationCommandPayload,
     participants: list[EnvelopeParticipant],
-) -> list[dict[str, str]]:
+) -> tuple[CommandRecipient, ...]:
     """Merge command recipients ({email, role}) with receiver-resolved user_ids from the envelope."""
     user_id_by_email = {p.email.lower(): p.user_id for p in participants if p.user_id}
-    recipients: list[dict[str, str]] = []
-    for recipient in payload.recipients:
-        resolved: dict[str, str] = {"email": recipient.email, "role": recipient.role.value}
-        user_id = user_id_by_email.get(recipient.email.lower())
-        if user_id:
-            resolved["user_id"] = user_id
-        recipients.append(resolved)
-    return recipients
+    return tuple(
+        CommandRecipient(
+            email=recipient.email,
+            role=recipient.role.value,
+            user_id=user_id_by_email.get(recipient.email.lower()),
+        )
+        for recipient in payload.recipients
+    )
 
 
 class NotificationConsumer:
@@ -38,19 +103,27 @@ class NotificationConsumer:
         *,
         broker: RabbitBroker,
         exchange: RabbitExchange,
-        use_case: ProcessDomainEventUseCase,
+        use_case: ProcessNotificationCommandUseCase,
         queue_spec: QueueSpec = NOTIFICATION_COMMANDS_QUEUE,
+        prefetch_count: int = 10,
+        transient_retry_attempts: int = DEFAULT_TRANSIENT_RETRY_ATTEMPTS,
+        retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS,
     ) -> None:
         self._broker = broker
         self._exchange = exchange
         self._queue_spec = queue_spec
         self._use_case = use_case
+        self._prefetch_count = prefetch_count
+        self._transient_retry_attempts = transient_retry_attempts
+        self._retry_backoff_seconds = retry_backoff_seconds
         self._started = False
 
-    async def start(self) -> None:
-        if self._started:
-            return
+    @property
+    def started(self) -> bool:
+        return self._started
 
+    def build_queue_and_channel(self) -> tuple[RabbitQueue, Channel]:
+        """Canonical queue declaration (event_schemas.queues) + QoS channel."""
         queue = RabbitQueue(
             name=self._queue_spec.name,
             durable=True,
@@ -58,16 +131,29 @@ class NotificationConsumer:
             declare=True,
             arguments=self._queue_spec.arguments,
         )
-        # TODO: Set explicit ack_policy on subscriber if FastStream adds support for it
+        return queue, Channel(prefetch_count=self._prefetch_count)
 
-        @self._broker.subscriber(queue=queue, exchange=self._exchange)
-        async def handle(body: bytes, headers: dict) -> None:
-            await self._handle(body=body, headers=headers)
+    async def start(self) -> None:
+        if self._started:
+            return
+
+        queue, channel = self.build_queue_and_channel()
+        subscriber = self._broker.subscriber(queue=queue, exchange=self._exchange, channel=channel)
+        subscriber(self._make_handler())
 
         await self._broker.start()
         await self._ensure_dead_letter_topology()
         self._started = True
-        logger.info("Notification consumer started", queue=self._queue_spec.name)
+        logger.info("Notification consumer started", queue=self._queue_spec.name, prefetch=self._prefetch_count)
+
+    def _make_handler(self):
+        """Handler takes the raw message via Context, so FastStream never tries to
+        pydantic-validate handler parameters against the decoded body."""
+
+        async def consume(message: Any = Context("message")) -> None:  # noqa: B008
+            await self._consume_message(message)
+
+        return consume
 
     async def _ensure_dead_letter_topology(self) -> None:
         """Idempotently declare the DLX and own DLQ (no startup-order dependency on event-receiver)."""
@@ -86,49 +172,57 @@ class NotificationConsumer:
     async def stop(self) -> None:
         if not self._started:
             return
-        await self._broker.close()
+        await self._broker.stop()
         self._started = False
         logger.info("Notification consumer stopped", queue=self._queue_spec.name)
 
-    async def _handle(self, *, body: bytes, headers: dict) -> None:
+    async def _consume_message(self, message: Any) -> None:
         try:
-            ce = from_http(headers=headers, data=body)
-        except Exception:
-            logger.exception("Failed to parse CloudEvent")
-            raise
+            command = parse_notification_command(headers=dict(message.headers), body=message.body)
+        except Exception as exc:
+            logger.exception("Poison message (unparseable CloudEvent or invalid payload), dead-lettering")
+            raise RejectMessage from exc
 
-        event_type = ce["type"]
-        if event_type not in DOMAIN_EVENT_TO_TRIGGER and event_type != NOTIFICATION_COMMAND_EVENT:
-            logger.warning("Unknown event type, skipping", event_type=event_type)
+        if command is None:
             return
 
-        # Unwrap the canonical {original, normalized} envelope produced by event-receiver
-        envelope = EventEnvelope.model_validate(ce.data or {})
-        data = dict(envelope.original)
-        booking_id = ce.get(BOOKING_ID_ATTRIBUTE) or data.get("booking_id", "")
-
-        if event_type == NOTIFICATION_COMMAND_EVENT:
-            try:
-                payload = envelope.parse_payload(NotificationCommandPayload)
-            except ValidationError:
-                # Contract violation: dead-letter it (visible in DLQ) instead of silently dropping
-                logger.exception("Invalid notification.send_requested payload", event_id=ce["id"])
-                raise
-            data["recipients"] = _resolve_recipients(payload, envelope.normalized.participants)
-
-        event = DomainEvent(
-            event_id=ce["id"],
-            event_type=event_type,
-            source=ce["source"],
-            booking_id=booking_id,
-            data=data,
-        )
-
         logger.info(
-            "Received domain event",
-            event_type=event_type,
-            event_id=ce["id"],
-            booking_id=booking_id,
+            "Received notification command",
+            event_id=command.event_id,
+            booking_id=command.booking_id,
+            trigger_event=command.trigger_event,
+            recipient_count=len(command.recipients),
         )
+        await self._execute_with_retry(command)
 
-        await self._use_case.execute(event)
+    async def _execute_with_retry(self, command: NotificationCommand) -> None:
+        last_error: BaseException | None = None
+        for attempt in range(1, self._transient_retry_attempts + 1):
+            last_error = await self._attempt_execute(command)
+            if last_error is None:
+                return
+            logger.warning(
+                "Transient failure processing notification command, retrying",
+                attempt=attempt,
+                max_attempts=self._transient_retry_attempts,
+                error=str(last_error),
+                event_id=command.event_id,
+            )
+            if attempt < self._transient_retry_attempts:
+                await asyncio.sleep(self._retry_backoff_seconds * 2 ** (attempt - 1))
+
+        logger.error("Transient retries exhausted, requeueing message", event_id=command.event_id)
+        raise NackMessage(requeue=True) from last_error
+
+    async def _attempt_execute(self, command: NotificationCommand) -> BaseException | None:
+        """Run one attempt; return the transient error, reject poison, None on success."""
+        try:
+            await self._use_case.execute(command)
+        except NackMessage, RejectMessage:
+            raise
+        except Exception as exc:
+            if not _is_transient(exc):
+                logger.exception("Non-transient failure processing command: poison, dead-lettering")
+                raise RejectMessage from exc
+            return exc
+        return None
