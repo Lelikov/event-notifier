@@ -46,7 +46,12 @@ def make_command_body() -> bytes:
             },
             "normalized": {
                 "participants": [
-                    {"email": "org@example.com", "role": "organizer", "user_id": "uuid-org"},
+                    {
+                        "email": "org@example.com",
+                        "role": "organizer",
+                        "user_id": "uuid-org",
+                        "time_zone": "Europe/Moscow",
+                    },
                     {"email": "cli@example.com", "role": "client", "user_id": "uuid-cli"},
                 ]
             },
@@ -76,9 +81,9 @@ def test_parses_canonical_envelope_and_resolves_user_ids() -> None:
     assert command.event_id == "evt-1"
     assert command.booking_id == "b-1"
     assert command.trigger_event == "BOOKING_CREATED"
-    assert [(r.email, r.role, r.user_id) for r in command.recipients] == [
-        ("org@example.com", "organizer", "uuid-org"),
-        ("cli@example.com", "client", "uuid-cli"),
+    assert [(r.email, r.role, r.user_id, r.time_zone) for r in command.recipients] == [
+        ("org@example.com", "organizer", "uuid-org", "Europe/Moscow"),
+        ("cli@example.com", "client", "uuid-cli", None),
     ]
     # D6: template_data merged over original
     assert command.template_context["title"] == "Session"

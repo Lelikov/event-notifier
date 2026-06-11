@@ -132,3 +132,18 @@ async def test_concurrent_duplicate_is_tolerated(mock_repository, mock_users_cli
     await make_use_case(mock_repository, mock_users_client).execute(make_command())
 
     mock_repository.write_outbox_atomically.assert_awaited_once()
+
+
+async def test_template_context_is_localized_per_recipient(mock_repository, mock_users_client):
+    recipients = (
+        CommandRecipient(email="org@example.com", role="organizer", user_id="uuid-org", time_zone="Europe/Moscow"),
+        CommandRecipient(email="cli@example.com", role="client", user_id="uuid-cli", time_zone=None),
+    )
+    await make_use_case(mock_repository, mock_users_client).execute(make_command(recipients))
+
+    records = mock_repository.write_outbox_atomically.call_args.kwargs["records"]
+    by_email = {r["recipient_email"]: r["template_context"] for r in records}
+    assert by_email["org@example.com"]["start_time_local"] == "12.06.2026 13:00"  # UTC+3
+    assert by_email["org@example.com"]["time_zone"] == "Europe/Moscow"
+    assert by_email["org@example.com"]["start_time"] == "2026-06-12T10:00:00Z"  # original untouched
+    assert "start_time_local" not in by_email["cli@example.com"]

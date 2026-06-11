@@ -25,6 +25,7 @@ class CommandRecipient:
     email: str
     role: str
     user_id: str | None = None  # event-users UUID resolved from normalized.participants
+    time_zone: str | None = None  # IANA zone resolved from normalized.participants
 
 
 @dataclass(frozen=True, slots=True)

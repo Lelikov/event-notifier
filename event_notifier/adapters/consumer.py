@@ -85,16 +85,23 @@ def _resolve_recipients(
     payload: NotificationCommandPayload,
     participants: list[EnvelopeParticipant],
 ) -> tuple[CommandRecipient, ...]:
-    """Merge command recipients ({email, role}) with receiver-resolved user_ids from the envelope."""
-    user_id_by_email = {p.email.lower(): p.user_id for p in participants if p.user_id}
+    """Merge command recipients ({email, role}) with receiver-resolved user_ids/time zones from the envelope."""
+    by_email = {p.email.lower(): p for p in participants}
     return tuple(
         CommandRecipient(
             email=recipient.email,
             role=recipient.role.value,
-            user_id=user_id_by_email.get(recipient.email.lower()),
+            user_id=_participant_field(by_email.get(recipient.email.lower()), "user_id"),
+            time_zone=_participant_field(by_email.get(recipient.email.lower()), "time_zone"),
         )
         for recipient in payload.recipients
     )
+
+
+def _participant_field(participant: EnvelopeParticipant | None, field: str) -> str | None:
+    if participant is None:
+        return None
+    return getattr(participant, field) or None
 
 
 class NotificationConsumer:

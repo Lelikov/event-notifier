@@ -4,6 +4,7 @@ from typing import Any
 
 import structlog
 
+from event_notifier.domain.localization import localize_template_context
 from event_notifier.domain.models.notification import (
     ChannelContact,
     ChannelType,
@@ -43,11 +44,13 @@ class ProcessNotificationCommandUseCase:
             logger.info("Event already processed, skipping", event_id=command.event_id)
             return
 
-        contacts: list[ChannelContact] = []
+        records: list[dict[str, Any]] = []
         for recipient in command.recipients:
-            contacts.extend(await self._resolve_contacts(recipient))
+            template_context = localize_template_context(command.template_context, recipient.time_zone)
+            for contact in await self._resolve_contacts(recipient):
+                records.append(self._to_outbox_record(command, contact, template_context))
 
-        if not contacts:
+        if not records:
             # Explicit no_contacts outcome: still claim the event (no redelivery loop),
             # but make the loss visible as a structured warning, never a silent ack.
             logger.warning(
@@ -61,7 +64,6 @@ class ProcessNotificationCommandUseCase:
             await self._repository.write_outbox_atomically(cloud_event_id=command.event_id, records=[])
             return
 
-        records = [self._to_outbox_record(command, contact) for contact in contacts]
         written = await self._repository.write_outbox_atomically(
             cloud_event_id=command.event_id,
             records=records,
@@ -117,7 +119,11 @@ class ProcessNotificationCommandUseCase:
         return contacts
 
     @staticmethod
-    def _to_outbox_record(command: NotificationCommand, contact: ChannelContact) -> dict[str, Any]:
+    def _to_outbox_record(
+        command: NotificationCommand,
+        contact: ChannelContact,
+        template_context: dict[str, Any],
+    ) -> dict[str, Any]:
         return {
             # Keyed by recipient email (stable across user_id backfills), not UUID.
             "idempotency_key": f"{command.event_id}:{contact.email}:{contact.channel.value}",
@@ -129,5 +135,6 @@ class ProcessNotificationCommandUseCase:
             "recipient_role": contact.role,
             "channel": contact.channel.value,
             "trigger_event": command.trigger_event,
-            "template_context": command.template_context,
+            # Per-recipient: includes *_local time keys when the recipient's zone is known.
+            "template_context": template_context,
         }
