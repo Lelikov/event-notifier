@@ -74,7 +74,7 @@ class AppProvider(Provider):
     @provide(scope=Scope.APP)
     async def provide_email_channel(self, settings: Settings) -> AsyncGenerator[EmailChannel]:
         async with AsyncClient(
-            base_url="https://go.unisender.ru",
+            base_url=settings.unisender_base_url,
             timeout=_HTTP_TIMEOUT,
             headers={"X-API-KEY": settings.unisender_api_key},
         ) as client:
@@ -90,7 +90,7 @@ class AppProvider(Provider):
     async def provide_telegram_channel(self, settings: Settings) -> AsyncGenerator[TelegramChannel]:
         # Loader root = templates/; per-locale lookup is "<locale>/telegram/<TRIGGER>.j2".
         template_env = Environment(loader=FileSystemLoader(_TEMPLATES_DIR), autoescape=True)
-        async with AsyncClient(base_url="https://api.telegram.org", timeout=_HTTP_TIMEOUT) as client:
+        async with AsyncClient(base_url=settings.telegram_base_url, timeout=_HTTP_TIMEOUT) as client:
             yield TelegramChannel(
                 http_client=client,
                 bot_token=settings.telegram_bot_token,

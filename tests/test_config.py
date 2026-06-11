@@ -70,3 +70,20 @@ def test_empty_template_ids_yield_empty_mapping():
 @pytest.mark.parametrize("value", [{"BOOKING_CREATED": "a"}, {"ru": {"BOOKING_CREATED": "a"}}])
 def test_both_config_shapes_validate(value):
     assert make_settings(unisender_template_ids=value).unisender_template_ids == value
+
+
+def test_external_api_base_urls_default_to_production():
+    settings = make_settings()
+
+    assert settings.unisender_base_url == "https://go.unisender.ru"
+    assert settings.telegram_base_url == "https://api.telegram.org"
+
+
+def test_external_api_base_urls_are_overridable():
+    settings = make_settings(
+        unisender_base_url="http://mocks:8080/unisender",
+        telegram_base_url="http://mocks:8080/telegram",
+    )
+
+    assert settings.unisender_base_url == "http://mocks:8080/unisender"
+    assert settings.telegram_base_url == "http://mocks:8080/telegram"

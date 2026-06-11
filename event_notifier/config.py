@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     # Default template language: recipients without a known locale get this one.
     default_locale: str = "ru"
 
+    # Production UniSender Go endpoint; override only to point at a local mock/integration stack.
+    unisender_base_url: str = "https://go.unisender.ru"
     unisender_api_key: str = Field(strict=True)
     unisender_from_email: str = Field(strict=True)
     unisender_from_name: str = "Notifications"
@@ -55,6 +57,8 @@ class Settings(BaseSettings):
             by_locale.setdefault(self.default_locale, {})[key] = value
         return by_locale
 
+    # Production Telegram Bot API endpoint; override only to point at a local mock/integration stack.
+    telegram_base_url: str = "https://api.telegram.org"
     telegram_bot_token: str = Field(strict=True)
 
     fcm_project_id: str | None = None

@@ -73,7 +73,7 @@ record) deduplicates re-publishes. Unset URL disables publishing (warning at sta
 
 | Property | Value |
 |----------|-------|
-| Endpoint | `POST https://go.unisender.ru/ru/transactional/api/v1/email/send.json` |
+| Endpoint | `POST {UNISENDER_BASE_URL}/ru/transactional/api/v1/email/send.json` (default `https://go.unisender.ru`) |
 | Auth | `X-API-KEY` header (never in body, never logged) |
 | Templates | UUIDs from `UNISENDER_TEMPLATE_IDS[trigger_event]`; flat scalar `global_substitutions` |
 
@@ -89,7 +89,7 @@ record) deduplicates re-publishes. Unset URL disables publishing (warning at sta
 
 | Property | Value |
 |----------|-------|
-| Endpoint | `POST https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage` |
+| Endpoint | `POST {TELEGRAM_BASE_URL}/bot{TELEGRAM_BOT_TOKEN}/sendMessage` (default `https://api.telegram.org`) |
 | Body | `{"chat_id", "text", "parse_mode": "HTML"}` rendered from `templates/telegram/*.j2` |
 
 **Failure modes:** same classification as email (403 blocked-bot and 400 bad chat_id are
