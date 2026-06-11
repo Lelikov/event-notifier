@@ -2,27 +2,11 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, Text, text
+from sqlalchemy import CheckConstraint, DateTime, Index, Integer, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from event_notifier.db.base import Base
-
-
-class RoutingRuleModel(Base):
-    __tablename__ = "routing_rules"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    event_type: Mapped[str] = mapped_column(Text, nullable=False)
-    recipient_field: Mapped[str] = mapped_column(Text, nullable=False)
-    recipient_role: Mapped[str] = mapped_column(Text, nullable=False)
-    priority: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'normal'"))
-    ignore_quiet_hours: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-
-    __table_args__ = (
-        Index("idx_routing_rules_unique", "event_type", "recipient_field", "recipient_role", unique=True),
-    )
 
 
 class ProcessedEventModel(Base):
@@ -44,14 +28,16 @@ class NotificationOutboxModel(Base):
     cloud_event_id: Mapped[str] = mapped_column(Text, nullable=False)
     booking_id: Mapped[str] = mapped_column(Text, nullable=False)
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    recipient_email: Mapped[str] = mapped_column(Text, nullable=False)
     recipient_address: Mapped[str] = mapped_column(Text, nullable=False)
     recipient_role: Mapped[str] = mapped_column(Text, nullable=False)
     channel: Mapped[str] = mapped_column(Text, nullable=False)
-    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    trigger_event: Mapped[str] = mapped_column(Text, nullable=False)
     template_context: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("5"))
+    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("10"))
     scheduled_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -68,4 +54,11 @@ class NotificationOutboxModel(Base):
         server_default=text("now()"),
     )
 
-    __table_args__ = (Index("idx_outbox_pending", "scheduled_at", postgresql_where=text("status = 'pending'")),)
+    __table_args__ = (
+        Index("idx_outbox_pending", "scheduled_at", postgresql_where=text("status = 'pending'")),
+        Index("idx_outbox_processing", "updated_at", postgresql_where=text("status = 'processing'")),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'delivered', 'failed')",
+            name="ck_outbox_status",
+        ),
+    )
