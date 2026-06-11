@@ -15,7 +15,7 @@ from event_notifier.infrastructure.channels.telegram import TelegramChannel
 
 SEND_URL = "https://api.telegram.org/bottest-token/sendMessage"
 
-_TEMPLATES_DIR = Path(__file__).parents[2] / "event_notifier" / "templates" / "telegram"
+_TEMPLATES_DIR = Path(__file__).parents[2] / "event_notifier" / "templates"
 
 
 @pytest.fixture
@@ -62,13 +62,75 @@ async def test_renders_booking_details_from_template_data(telegram_channel, cont
 
 
 @pytest.mark.parametrize("trigger", list(TriggerEvent))
-async def test_every_trigger_has_a_template(telegram_channel, contact, trigger):
+@pytest.mark.parametrize("locale", ["ru", "en"])
+async def test_every_trigger_has_a_template_in_every_locale(telegram_channel, contact, trigger, locale):
     with respx.mock:
         respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 1}}))
 
-        result = await telegram_channel.send(contact=contact, trigger_event=trigger, template_data={})
+        result = await telegram_channel.send(contact=contact, trigger_event=trigger, template_data={"locale": locale})
 
     assert result.success is True
+
+
+async def test_en_locale_selects_english_template(telegram_channel, contact):
+    with respx.mock:
+        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 1}}))
+
+        result = await telegram_channel.send(
+            contact=contact,
+            trigger_event=TriggerEvent.BOOKING_CANCELLED,
+            template_data={"locale": "en", "start_time": "2026-06-12 10:00", "cancellation_reason": "illness"},
+        )
+
+    assert result.success is True
+    body = json.loads(route.calls[0].request.content)
+    assert "Meeting cancelled" in body["text"]
+    assert "illness" in body["text"]
+
+
+async def test_missing_locale_falls_back_to_default_russian(telegram_channel, contact):
+    with respx.mock:
+        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 1}}))
+
+        result = await telegram_channel.send(
+            contact=contact,
+            trigger_event=TriggerEvent.BOOKING_CANCELLED,
+            template_data={"start_time": "2026-06-12 10:00"},
+        )
+
+    assert result.success is True
+    body = json.loads(route.calls[0].request.content)
+    assert "Встреча отменена" in body["text"]
+
+
+async def test_unknown_locale_falls_back_to_default_russian(telegram_channel, contact):
+    with respx.mock:
+        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 1}}))
+
+        result = await telegram_channel.send(
+            contact=contact,
+            trigger_event=TriggerEvent.BOOKING_CANCELLED,
+            template_data={"locale": "fr"},
+        )
+
+    assert result.success is True
+    body = json.loads(route.calls[0].request.content)
+    assert "Встреча отменена" in body["text"]
+
+
+async def test_regional_locale_variant_maps_to_primary_language(telegram_channel, contact):
+    with respx.mock:
+        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 1}}))
+
+        result = await telegram_channel.send(
+            contact=contact,
+            trigger_event=TriggerEvent.BOOKING_CANCELLED,
+            template_data={"locale": "en-GB"},
+        )
+
+    assert result.success is True
+    body = json.loads(route.calls[0].request.content)
+    assert "Meeting cancelled" in body["text"]
 
 
 async def test_unknown_trigger_fails_permanently(template_env, contact):

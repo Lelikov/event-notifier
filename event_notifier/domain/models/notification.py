@@ -26,6 +26,7 @@ class CommandRecipient:
     role: str
     user_id: str | None = None  # event-users UUID resolved from normalized.participants
     time_zone: str | None = None  # IANA zone resolved from normalized.participants
+    locale: str | None = None  # language tag from recipients[].locale / normalized.participants[].locale
 
 
 @dataclass(frozen=True, slots=True)

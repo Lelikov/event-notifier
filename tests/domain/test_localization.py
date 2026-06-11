@@ -1,6 +1,6 @@
 """Tests for per-recipient template-context localization."""
 
-from event_notifier.domain.localization import localize_template_context
+from event_notifier.domain.localization import localize_template_context, normalize_locale
 
 UTC_CONTEXT = {"start_time": "2026-05-12T22:05:00", "end_time": "2026-05-12T23:05:00", "title": "Session"}
 
@@ -46,3 +46,31 @@ def test_unparseable_or_missing_values_are_skipped():
     assert "start_time_local" not in result
     assert "end_time_local" not in result
     assert result["time_zone"] == "Europe/Madrid"
+
+
+def test_locale_is_added_to_context():
+    result = localize_template_context(UTC_CONTEXT, "Europe/Madrid", locale="ru")
+
+    assert result["locale"] == "ru"
+    assert result["time_zone"] == "Europe/Madrid"
+
+
+def test_regional_locale_is_reduced_to_primary_subtag():
+    result = localize_template_context({}, None, locale="en-GB")
+
+    assert result["locale"] == "en"
+
+
+def test_absent_locale_adds_no_key():
+    result = localize_template_context(UTC_CONTEXT, "Europe/Madrid")
+
+    assert "locale" not in result
+
+
+def test_normalize_locale_handles_edge_cases():
+    assert normalize_locale(None) is None
+    assert normalize_locale("") is None
+    assert normalize_locale("  ") is None
+    assert normalize_locale("RU") == "ru"
+    assert normalize_locale("pt_BR") == "pt"
+    assert normalize_locale(" en-GB ") == "en"

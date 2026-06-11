@@ -4,6 +4,9 @@ External contract (hard invariant): POST /ru/transactional/api/v1/email/send.jso
 with the API key in the X-API-KEY header (never in the body, never logged) and
 ``message.template_id`` set to a real template UUID provisioned in UniSender Go
 and supplied via UNISENDER_TEMPLATE_IDS config.
+
+Template ids are locale-keyed ({locale: {TRIGGER_EVENT: id}}); the recipient's
+``template_data["locale"]`` selects the set, falling back to the default locale.
 """
 
 from typing import Any
@@ -13,6 +16,7 @@ import structlog
 from event_schemas.types import TriggerEvent
 from httpx import AsyncClient, HTTPStatusError
 
+from event_notifier.domain.localization import normalize_locale
 from event_notifier.domain.models.notification import ChannelContact, ChannelType, DeliveryResult
 
 logger = structlog.get_logger(__name__)
@@ -40,14 +44,16 @@ class EmailChannel:
         self,
         *,
         http_client: AsyncClient,
-        template_ids: dict[str, str],
+        template_ids_by_locale: dict[str, dict[str, str]],
         from_email: str,
         from_name: str,
+        default_locale: str = "ru",
     ) -> None:
         self._client = http_client
-        self._template_ids = template_ids
+        self._template_ids_by_locale = template_ids_by_locale
         self._from_email = from_email
         self._from_name = from_name
+        self._default_locale = default_locale
 
     async def send(
         self,
@@ -56,7 +62,7 @@ class EmailChannel:
         trigger_event: TriggerEvent,
         template_data: dict[str, Any],
     ) -> DeliveryResult:
-        template_id = self._template_ids.get(trigger_event.value)
+        template_id = self._template_id(trigger_event, template_data)
         if not template_id:
             return DeliveryResult(
                 channel=ChannelType.EMAIL,
@@ -91,3 +97,12 @@ class EmailChannel:
         job_id = body.get("job_id")
         logger.info("Email sent", to=contact.contact_id, trigger=trigger_event.value, job_id=job_id)
         return DeliveryResult(channel=ChannelType.EMAIL, success=True, message_id=job_id)
+
+    def _template_id(self, trigger_event: TriggerEvent, template_data: dict[str, Any]) -> str | None:
+        """Pick the template id for the recipient's locale, falling back to the default locale's set."""
+        locale = normalize_locale(template_data.get("locale")) or self._default_locale
+        for candidate in dict.fromkeys((locale, self._default_locale)):
+            template_id = self._template_ids_by_locale.get(candidate, {}).get(trigger_event.value)
+            if template_id:
+                return template_id
+        return None

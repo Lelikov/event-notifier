@@ -39,7 +39,7 @@ NotificationConsumer (adapters/consumer.py)
 ProcessNotificationCommandUseCase (application/use_cases/process_notification_command.py)
   – email contact always from the command recipient; user_id only ADDS channels
     (UsersClient GET /api/users/id/{id}: 404 → email-only, 5xx/transport → raise → retry)
-  – per-recipient localization (start_time_local/end_time_local/time_zone)
+  – per-recipient localization (start_time_local/end_time_local/time_zone + locale)
   – processed_events claim + outbox insert in ONE transaction (idempotent)
         │
         ▼
@@ -51,7 +51,7 @@ OutboxSender (adapters/outbox_sender.py)
   – success → 'delivered' + DeliveryResultPublisher → POST CloudEvent to event-receiver
         │
         ├──► EmailChannel    → UniSender Go (template UUIDs from UNISENDER_TEMPLATE_IDS)
-        ├──► TelegramChannel → Bot API sendMessage (Jinja2: templates/telegram/<TRIGGER>.j2)
+        ├──► TelegramChannel → Bot API sendMessage (Jinja2: templates/<locale>/telegram/<TRIGGER>.j2)
         └──► (PushChannel    – implemented, not registered: FCM credentials pending)
 ```
 
@@ -72,7 +72,7 @@ OutboxSender (adapters/outbox_sender.py)
 | Result publisher | `adapters/result_publisher.py` | fire-and-forget `notification.*.message_sent` POST |
 | Interfaces | `interfaces/` | `INotificationChannel`, `IUsersClient`, `ISqlExecutor`, `INotificationRepository`, `IDeliveryResultPublisher` protocols |
 | Channels | `infrastructure/channels/` | UniSender Go, Telegram, FCM (unregistered) |
-| Templates | `event_notifier/templates/telegram/` | Jinja2 message bodies (one file per TriggerEvent) |
+| Templates | `event_notifier/templates/<locale>/telegram/` | Jinja2 message bodies (one file per TriggerEvent per locale; `ru` default, `en` shipped) |
 
 ### Adding a New Channel
 
@@ -96,7 +96,8 @@ OutboxSender (adapters/outbox_sender.py)
 See `.env.example`. Required: `DATABASE_URL` (asyncpg), `EVENT_USERS_URL`,
 `EVENT_USERS_TOKEN`, `UNISENDER_API_KEY`, `UNISENDER_FROM_EMAIL`, `TELEGRAM_BOT_TOKEN`.
 Optional: `EVENTS_ENDPOINT_URL`/`EVENTS_API_KEY` (delivery results),
-`UNISENDER_TEMPLATE_IDS` (JSON dict), `CONSUMER_PREFETCH_COUNT`, `GRACEFUL_TIMEOUT`, FCM vars.
+`UNISENDER_TEMPLATE_IDS` (JSON dict, locale-keyed or flat), `DEFAULT_LOCALE` (default `ru`),
+`CONSUMER_PREFETCH_COUNT`, `GRACEFUL_TIMEOUT`, FCM vars.
 
 ### Test Approach
 

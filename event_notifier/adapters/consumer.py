@@ -85,17 +85,22 @@ def _resolve_recipients(
     payload: NotificationCommandPayload,
     participants: list[EnvelopeParticipant],
 ) -> tuple[CommandRecipient, ...]:
-    """Merge command recipients ({email, role}) with receiver-resolved user_ids/time zones from the envelope."""
+    """Merge command recipients ({email, role, locale?}) with receiver-resolved envelope participants."""
     by_email = {p.email.lower(): p for p in participants}
-    return tuple(
-        CommandRecipient(
-            email=recipient.email,
-            role=recipient.role.value,
-            user_id=_participant_field(by_email.get(recipient.email.lower()), "user_id"),
-            time_zone=_participant_field(by_email.get(recipient.email.lower()), "time_zone"),
+    resolved: list[CommandRecipient] = []
+    for recipient in payload.recipients:
+        participant = by_email.get(recipient.email.lower())
+        resolved.append(
+            CommandRecipient(
+                email=recipient.email,
+                role=recipient.role.value,
+                user_id=_participant_field(participant, "user_id"),
+                time_zone=_participant_field(participant, "time_zone"),
+                # Producer-supplied locale wins; the envelope participant is the receiver's copy of it.
+                locale=recipient.locale or _participant_field(participant, "locale"),
+            )
         )
-        for recipient in payload.recipients
-    )
+    return tuple(resolved)
 
 
 def _participant_field(participant: EnvelopeParticipant | None, field: str) -> str | None:

@@ -40,7 +40,7 @@ event-notifier entries of `rabbitmq-topology`, `delivery-reliability`,
 | Test suite validated a non-existent wire contract; consumer/IoC zero coverage | 80 tests against the real envelope, `TestRabbitBroker` wire test, IoC container resolution tests, repository SQL tests |
 | Telegram sent raw internal trigger string for unknown triggers | Unknown triggers fail permanently; bodies come from Jinja2 templates only |
 | `is_processed` not atomic with outbox write (duplicate fan-out) | `write_outbox_atomically`: processed_events claim + inserts in ONE transaction; concurrent duplicate returns False |
-| No per-recipient localization (times raw UTC, time_zone unused, locale dropped) | **Partially fixed (notifier side):** per-recipient `start_time_local`/`end_time_local`/`time_zone` from `normalized.participants[].time_zone`. **Open (cross-service):** locale/language never reaches the envelope — needs event-receiver/event-schemas change |
+| No per-recipient localization (times raw UTC, time_zone unused, locale dropped) | **Fixed:** per-recipient `start_time_local`/`end_time_local`/`time_zone` from `normalized.participants[].time_zone`; language half fixed 2026-06-11 — `locale` flows producer → receiver → envelope → per-locale template selection with `DEFAULT_LOCALE` fallback |
 
 ### LOW — all fixed
 
@@ -54,10 +54,13 @@ event-notifier entries of `rabbitmq-topology`, `delivery-reliability`,
 
 ## Open Items
 
-1. **Locale/language localization** — cross-service: cal.com `language.locale` is
-   dropped at ingress; `NormalizedParticipant`/envelope carry no locale. Requires
-   event-receiver + event-schemas changes before the notifier can select template
-   language per recipient.
+1. **Locale/language localization** — RESOLVED (audit-v2 follow-up #4, 2026-06-11):
+   event-schemas 0.3.0 added `locale` to `EnvelopeParticipant`/`NotificationRecipient`;
+   event-receiver propagates cal.com `language.locale`; the notifier resolves a
+   per-recipient locale (producer value first, envelope fallback), stores it in the
+   outbox `template_context`, and channels select templates per locale
+   (`templates/<locale>/telegram/...`, locale-keyed `UNISENDER_TEMPLATE_IDS`) with
+   `DEFAULT_LOCALE` (`ru`) fallback.
 2. **PushChannel** — implemented and classification-aligned but not registered
    (FCM credentials and an access-token provider pending).
 3. **Metrics/alerting** — `failed` outbox rows and DLQ depth are only visible via

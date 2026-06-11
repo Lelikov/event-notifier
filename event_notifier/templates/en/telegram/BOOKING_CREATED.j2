@@ -1,0 +1,6 @@
+📅 <b>New meeting booked.</b>
+{% if start_time %}Starts: {{ start_time_local or start_time }}{% if start_time_local and time_zone %} ({{ time_zone }}){% endif %}
+{% endif %}{% if end_time %}Ends: {{ end_time_local or end_time }}
+{% endif %}{% if organizer_name %}Organizer: {{ organizer_name }}
+{% endif %}{% if meeting_url %}Link: {{ meeting_url }}
+{% endif %}

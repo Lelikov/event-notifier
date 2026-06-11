@@ -1,8 +1,10 @@
 """Telegram notification channel via Bot API sendMessage.
 
-Message bodies are Jinja2 templates (templates/telegram/<TRIGGER_EVENT>.j2),
+Message bodies are Jinja2 templates (templates/<locale>/telegram/<TRIGGER_EVENT>.j2),
 rendered with the flat template_data — never hardcoded strings, never the raw
-trigger name leaked to end users. Unknown triggers fail permanently.
+trigger name leaked to end users. The template language is chosen by
+``template_data["locale"]`` with fallback to the configured default locale;
+unknown triggers (no template in any candidate locale) fail permanently.
 """
 
 from typing import Any
@@ -13,6 +15,7 @@ from event_schemas.types import TriggerEvent
 from httpx import AsyncClient, HTTPStatusError
 from jinja2 import Environment, TemplateNotFound
 
+from event_notifier.domain.localization import normalize_locale
 from event_notifier.domain.models.notification import ChannelContact, ChannelType, DeliveryResult
 
 logger = structlog.get_logger(__name__)
@@ -31,10 +34,12 @@ class TelegramChannel:
         http_client: AsyncClient,
         bot_token: str,
         template_env: Environment,
+        default_locale: str = "ru",
     ) -> None:
         self._client = http_client
         self._bot_token = bot_token
         self._env = template_env
+        self._default_locale = default_locale
 
     async def send(
         self,
@@ -73,8 +78,12 @@ class TelegramChannel:
         return DeliveryResult(channel=ChannelType.TELEGRAM, success=True, message_id=message_id)
 
     def _render(self, trigger_event: TriggerEvent, template_data: dict[str, Any]) -> str | None:
-        try:
-            template = self._env.get_template(f"{trigger_event.value}.j2")
-        except TemplateNotFound:
-            return None
-        return template.render(**template_data).strip()
+        """Render the trigger's template in the recipient's locale, falling back to the default locale."""
+        locale = normalize_locale(template_data.get("locale")) or self._default_locale
+        for candidate in dict.fromkeys((locale, self._default_locale)):
+            try:
+                template = self._env.get_template(f"{candidate}/telegram/{trigger_event.value}.j2")
+            except TemplateNotFound:
+                continue
+            return template.render(**template_data).strip()
+        return None

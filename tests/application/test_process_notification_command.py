@@ -134,6 +134,19 @@ async def test_concurrent_duplicate_is_tolerated(mock_repository, mock_users_cli
     mock_repository.write_outbox_atomically.assert_awaited_once()
 
 
+async def test_recipient_locale_lands_in_template_context(mock_repository, mock_users_client):
+    recipients = (
+        CommandRecipient(email="org@example.com", role="organizer", user_id="uuid-org", locale="ru"),
+        CommandRecipient(email="cli@example.com", role="client", user_id="uuid-cli", locale=None),
+    )
+    await make_use_case(mock_repository, mock_users_client).execute(make_command(recipients))
+
+    records = mock_repository.write_outbox_atomically.call_args.kwargs["records"]
+    by_email = {r["recipient_email"]: r["template_context"] for r in records}
+    assert by_email["org@example.com"]["locale"] == "ru"
+    assert "locale" not in by_email["cli@example.com"]
+
+
 async def test_template_context_is_localized_per_recipient(mock_repository, mock_users_client):
     recipients = (
         CommandRecipient(email="org@example.com", role="organizer", user_id="uuid-org", time_zone="Europe/Moscow"),

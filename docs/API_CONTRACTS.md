@@ -113,13 +113,15 @@ logged and never retried (the notification itself is already delivered).
 ### UniSender Go
 - `POST https://go.unisender.ru/ru/transactional/api/v1/email/send.json`
 - API key in `X-API-KEY` header (never in body, never logged)
-- `message.template_id` = real template UUID from `UNISENDER_TEMPLATE_IDS[trigger_event]`
+- `message.template_id` = real template UUID from `UNISENDER_TEMPLATE_IDS[locale][trigger_event]`
+  (recipient locale from `template_context["locale"]`, fallback `DEFAULT_LOCALE`)
 - `message.global_substitutions` = flat scalar key/values only (nested structures dropped)
 
 ### Telegram Bot API
 - `POST https://api.telegram.org/bot{token}/sendMessage`
 - `{"chat_id", "text", "parse_mode": "HTML"}`; text rendered from
-  `templates/telegram/<TRIGGER_EVENT>.j2` (autoescaped)
+  `templates/<locale>/telegram/<TRIGGER_EVENT>.j2` (autoescaped; recipient locale with
+  fallback to `DEFAULT_LOCALE`, `ru` and `en` sets shipped)
 
 ---
 

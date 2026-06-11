@@ -13,7 +13,10 @@ from event_notifier.infrastructure.channels.email import EmailChannel, flatten_s
 
 SEND_URL = "https://go.unisender.ru/ru/transactional/api/v1/email/send.json"
 
-TEMPLATE_IDS = {"BOOKING_CREATED": "tmpl-uuid-created", "BOOKING_CANCELLED": "tmpl-uuid-cancelled"}
+TEMPLATE_IDS_BY_LOCALE = {
+    "ru": {"BOOKING_CREATED": "tmpl-uuid-created", "BOOKING_CANCELLED": "tmpl-uuid-cancelled"},
+    "en": {"BOOKING_CREATED": "tmpl-uuid-created-en"},
+}
 
 
 @pytest.fixture
@@ -21,9 +24,10 @@ async def email_channel():
     async with AsyncClient(base_url="https://go.unisender.ru", headers={"X-API-KEY": "secret-key"}) as client:
         yield EmailChannel(
             http_client=client,
-            template_ids=TEMPLATE_IDS,
+            template_ids_by_locale=TEMPLATE_IDS_BY_LOCALE,
             from_email="noreply@example.com",
             from_name="Test",
+            default_locale="ru",
         )
 
 
@@ -74,12 +78,58 @@ async def test_sends_exact_unisender_payload(email_channel, contact):
 async def test_unconfigured_template_fails_permanently(email_channel, contact):
     result = await email_channel.send(
         contact=contact,
-        trigger_event=TriggerEvent.BOOKING_REMINDER,  # not in TEMPLATE_IDS
+        trigger_event=TriggerEvent.BOOKING_REMINDER,  # not configured for any locale
         template_data={},
     )
 
     assert result.success is False
     assert result.retryable is False
+
+
+async def test_locale_selects_locale_keyed_template_id(email_channel, contact):
+    with respx.mock:
+        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"status": "success", "job_id": "j-1"}))
+
+        result = await email_channel.send(
+            contact=contact,
+            trigger_event=TriggerEvent.BOOKING_CREATED,
+            template_data={"locale": "en"},
+        )
+
+    assert result.success is True
+    body = json.loads(route.calls[0].request.content)
+    assert body["message"]["template_id"] == "tmpl-uuid-created-en"
+
+
+async def test_locale_without_own_template_falls_back_to_default_locale(email_channel, contact):
+    with respx.mock:
+        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"status": "success", "job_id": "j-2"}))
+
+        # 'en' has no BOOKING_CANCELLED template — the default 'ru' set is used.
+        result = await email_channel.send(
+            contact=contact,
+            trigger_event=TriggerEvent.BOOKING_CANCELLED,
+            template_data={"locale": "en"},
+        )
+
+    assert result.success is True
+    body = json.loads(route.calls[0].request.content)
+    assert body["message"]["template_id"] == "tmpl-uuid-cancelled"
+
+
+async def test_missing_locale_uses_default_locale_template(email_channel, contact):
+    with respx.mock:
+        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"status": "success", "job_id": "j-3"}))
+
+        result = await email_channel.send(
+            contact=contact,
+            trigger_event=TriggerEvent.BOOKING_CREATED,
+            template_data={},
+        )
+
+    assert result.success is True
+    body = json.loads(route.calls[0].request.content)
+    assert body["message"]["template_id"] == "tmpl-uuid-created"
 
 
 async def test_4xx_is_permanent(email_channel, contact):

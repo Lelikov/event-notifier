@@ -7,8 +7,11 @@ recipients. When the receiver resolved a recipient's IANA time zone
 recipient's zone. Original keys are never touched, so existing templates and
 provider substitutions keep working.
 
-Language/locale localization is NOT done here: cal.com's locale is dropped at
-ingress and never reaches the envelope (cross-service contract gap).
+Language localization: when the recipient's preferred language is known
+(producer recipients[].locale / normalized.participants[].locale, originally
+cal.com ``language.locale``), the template context gets a ``locale`` key.
+Channels use it to select the template language, falling back to the
+configured default locale (``Settings.default_locale``, "ru").
 """
 
 from datetime import UTC, datetime
@@ -17,6 +20,19 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _LOCALIZABLE_KEYS = ("start_time", "end_time")
 _LOCAL_TIME_FORMAT = "%d.%m.%Y %H:%M"
+
+
+def normalize_locale(locale: str | None) -> str | None:
+    """Reduce a language tag to its lowercase primary subtag: 'pt-BR'/'ru_RU' → 'pt'/'ru'.
+
+    Unknown/empty values degrade to None so callers fall back to the default locale.
+    """
+    if not locale:
+        return None
+    primary = locale.strip().replace("_", "-").split("-")[0].lower()
+    if not primary:
+        return None
+    return primary
 
 
 def _to_local(value: Any, zone: ZoneInfo) -> str | None:
@@ -31,23 +47,37 @@ def _to_local(value: Any, zone: ZoneInfo) -> str | None:
     return moment.astimezone(zone).strftime(_LOCAL_TIME_FORMAT)
 
 
-def localize_template_context(context: dict[str, Any], time_zone: str | None) -> dict[str, Any]:
-    """Return a copy of ``context`` with ``*_local`` keys in the recipient's zone.
+def localize_template_context(
+    context: dict[str, Any],
+    time_zone: str | None,
+    locale: str | None = None,
+) -> dict[str, Any]:
+    """Return a copy of ``context`` with ``*_local`` time keys and the recipient's ``locale``.
 
-    Unknown/missing zones and unparseable values degrade to the unchanged
-    context — localization must never block a delivery.
+    Unknown/missing zones, unparseable values and absent locales degrade to the
+    unchanged context — localization must never block a delivery.
     """
-    if not time_zone:
-        return dict(context)
-    try:
-        zone = ZoneInfo(time_zone)
-    except ZoneInfoNotFoundError, ValueError:
-        return dict(context)
-
     localized = dict(context)
+    normalized_locale = normalize_locale(locale)
+    if normalized_locale:
+        localized["locale"] = normalized_locale
+
+    zone = _zone(time_zone)
+    if zone is None:
+        return localized
+
     for key in _LOCALIZABLE_KEYS:
         local_value = _to_local(context.get(key), zone)
         if local_value is not None:
             localized[f"{key}_local"] = local_value
     localized["time_zone"] = time_zone
     return localized
+
+
+def _zone(time_zone: str | None) -> ZoneInfo | None:
+    if not time_zone:
+        return None
+    try:
+        return ZoneInfo(time_zone)
+    except ZoneInfoNotFoundError, ValueError:
+        return None

@@ -49,7 +49,7 @@ OutboxSender                                (adapters/outbox_sender.py)
   - success -> 'delivered' + DeliveryResultPublisher fires notification.*.message_sent
         |
         +--> EmailChannel    UniSender Go send.json (template UUIDs from UNISENDER_TEMPLATE_IDS)
-        +--> TelegramChannel Bot API sendMessage (Jinja2: templates/telegram/<TRIGGER>.j2)
+        +--> TelegramChannel Bot API sendMessage (Jinja2: templates/<locale>/telegram/<TRIGGER>.j2)
         +--> (PushChannel    FCM HTTP v1 -- implemented, NOT registered: credentials pending)
 ```
 
@@ -67,8 +67,8 @@ Tables: `processed_events` (idempotency, 7-day TTL cleanup loop), `notification_
 
 | Channel | Provider | Template mechanism |
 |---------|----------|--------------------|
-| Email | UniSender Go transactional API | `UNISENDER_TEMPLATE_IDS` config maps TriggerEvent value -> template UUID; flat scalar `global_substitutions` |
-| Telegram | Telegram Bot API `/sendMessage` | Jinja2 file per trigger: `event_notifier/templates/telegram/<TRIGGER_EVENT>.j2` |
+| Email | UniSender Go transactional API | `UNISENDER_TEMPLATE_IDS` config maps locale -> TriggerEvent value -> template UUID (flat legacy form = default locale); flat scalar `global_substitutions` |
+| Telegram | Telegram Bot API `/sendMessage` | Jinja2 file per locale and trigger: `event_notifier/templates/<locale>/telegram/<TRIGGER_EVENT>.j2` (ru + en shipped) |
 | Push (not registered) | FCM HTTP v1 | `_PUSH_TITLES` map; enable in `ioc.py` once FCM credentials exist |
 
 All channels classify failures into `DeliveryResult.retryable`:
@@ -80,8 +80,10 @@ Unknown triggers fail permanently — nothing internal is ever sent to end users
 `normalized.participants[].time_zone` (IANA) is resolved onto each recipient. The use
 case adds `start_time_local` / `end_time_local` (recipient zone, `%d.%m.%Y %H:%M`) and
 `time_zone` to that recipient's `template_context`; original keys are untouched.
-Language/locale localization is a known cross-service gap (cal.com locale is dropped
-at ingress and never reaches the envelope).
+Language: the recipient's locale (producer `recipients[].locale`, fallback
+`normalized.participants[].locale`; originally cal.com `language.locale`) is added as
+`template_context["locale"]`. Channels pick the template language from it with
+fallback to `DEFAULT_LOCALE` (default `ru`).
 
 ## Health
 
@@ -103,7 +105,9 @@ EVENTS_API_KEY              # auth for EVENTS_ENDPOINT_URL
 UNISENDER_API_KEY           # required (sent as X-API-KEY header, never in body)
 UNISENDER_FROM_EMAIL        # required
 UNISENDER_FROM_NAME         # default "Notifications"
-UNISENDER_TEMPLATE_IDS      # JSON dict: TriggerEvent value -> UniSender template UUID
+UNISENDER_TEMPLATE_IDS      # JSON dict: locale -> {TriggerEvent value -> UniSender template UUID}
+                            # (legacy flat {TriggerEvent: UUID} form = default locale)
+DEFAULT_LOCALE              # default template language, default "ru"
 TELEGRAM_BOT_TOKEN          # required
 FCM_PROJECT_ID              # optional (PushChannel not registered)
 FCM_SERVICE_ACCOUNT_JSON    # optional
@@ -112,9 +116,8 @@ DEBUG / LOG_LEVEL           # logging
 
 ## Known Limitations
 
-1. **No locale/language localization** — cross-service: the envelope carries no locale.
-2. **PushChannel not registered** — code and retry classification ready; needs FCM
+1. **PushChannel not registered** — code and retry classification ready; needs FCM
    credentials, an IoC provider and an access-token provider implementation.
-3. **Operator redrive of `failed` rows is manual SQL** —
+2. **Operator redrive of `failed` rows is manual SQL** —
    `UPDATE notification_outbox SET status='pending', retry_count=0 WHERE status='failed' AND ...`.
-4. **No metrics** — observability is structured logs only.
+3. **No metrics** — observability is structured logs only.

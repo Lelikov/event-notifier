@@ -39,7 +39,7 @@ def make_command_body() -> bytes:
                 "booking_id": "b-1",
                 "trigger_event": "BOOKING_CREATED",
                 "recipients": [
-                    {"email": "org@example.com", "role": "organizer"},
+                    {"email": "org@example.com", "role": "organizer", "locale": "ru"},
                     {"email": "cli@example.com", "role": "client"},
                 ],
                 "template_data": {"title": "Session", "start_time": "2026-06-12T10:00:00Z"},
@@ -52,7 +52,7 @@ def make_command_body() -> bytes:
                         "user_id": "uuid-org",
                         "time_zone": "Europe/Moscow",
                     },
-                    {"email": "cli@example.com", "role": "client", "user_id": "uuid-cli"},
+                    {"email": "cli@example.com", "role": "client", "user_id": "uuid-cli", "locale": "en"},
                 ]
             },
         }
@@ -88,6 +88,14 @@ def test_parses_canonical_envelope_and_resolves_user_ids() -> None:
     # D6: template_data merged over original
     assert command.template_context["title"] == "Session"
     assert command.template_context["start_time"] == "2026-06-12T10:00:00Z"
+
+
+def test_recipient_locale_prefers_producer_value_then_envelope() -> None:
+    """recipients[].locale (producer) wins; normalized.participants[].locale is the fallback."""
+    command = parse_notification_command(headers=make_headers(), body=make_command_body())
+
+    assert command is not None
+    assert [r.locale for r in command.recipients] == ["ru", "en"]
 
 
 def test_booking_id_falls_back_to_payload() -> None:

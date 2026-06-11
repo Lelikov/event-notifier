@@ -46,7 +46,11 @@ class ProcessNotificationCommandUseCase:
 
         records: list[dict[str, Any]] = []
         for recipient in command.recipients:
-            template_context = localize_template_context(command.template_context, recipient.time_zone)
+            template_context = localize_template_context(
+                command.template_context,
+                recipient.time_zone,
+                locale=recipient.locale,
+            )
             for contact in await self._resolve_contacts(recipient):
                 records.append(self._to_outbox_record(command, contact, template_context))
 
@@ -135,6 +139,7 @@ class ProcessNotificationCommandUseCase:
             "recipient_role": contact.role,
             "channel": contact.channel.value,
             "trigger_event": command.trigger_event,
-            # Per-recipient: includes *_local time keys when the recipient's zone is known.
+            # Per-recipient: includes *_local time keys when the recipient's zone is known
+            # and a 'locale' key when the recipient's language is known (template selection).
             "template_context": template_context,
         }
