@@ -5,16 +5,15 @@ from contextlib import asynccontextmanager
 from logging import getLevelNamesMapping
 from typing import TYPE_CHECKING
 
-import asyncpg
 import structlog
 from dishka import make_async_container
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from event_notifier.adapters.consumer import NotificationConsumer
 from event_notifier.adapters.outbox_sender import OutboxSender
 from event_notifier.config import Settings
 from event_notifier.db.repository import NotificationRepository
-from event_notifier.db.schema import create_tables
 from event_notifier.ioc import AppProvider
 from event_notifier.logger import setup_logger
 
@@ -25,7 +24,7 @@ logger = structlog.get_logger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     container = make_async_container(AppProvider())
 
     settings = await container.get(Settings)
@@ -34,20 +33,12 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
 
     logger.info("Starting event-notifier", log_level=settings.log_level)
 
-    # Initialize DB schema (idempotent)
-    pool = await container.get(asyncpg.Pool)
-    await create_tables(pool)
-    logger.info("DB schema ready")
-
-    # Start RabbitMQ consumer
     consumer = await container.get(NotificationConsumer)
     await consumer.start()
 
-    # Start OutboxSender as background asyncio task
     outbox_sender = await container.get(OutboxSender)
     sender_task = asyncio.create_task(outbox_sender.start(), name="outbox-sender")
 
-    # Start periodic cleanup of processed_events table
     repository = await container.get(NotificationRepository)
 
     async def _cleanup_loop() -> None:
@@ -59,6 +50,10 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
                 logger.exception("processed_events cleanup failed")
 
     cleanup_task = asyncio.create_task(_cleanup_loop(), name="processed-events-cleanup")
+
+    app.state.consumer = consumer
+    app.state.sender_task = sender_task
+    app.state.repository = repository
 
     logger.info("event-notifier ready")
 
@@ -82,9 +77,34 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
     await container.close()
 
 
-app = FastAPI(title="event-notifier", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="event-notifier", version="0.4.0", lifespan=lifespan)
+
+
+async def _collect_health_checks(application: FastAPI) -> dict[str, bool]:
+    consumer = getattr(application.state, "consumer", None)
+    sender_task = getattr(application.state, "sender_task", None)
+    repository = getattr(application.state, "repository", None)
+
+    checks = {
+        "consumer": consumer is not None and consumer.started,
+        "outbox_sender": sender_task is not None and not sender_task.done(),
+        "database": False,
+    }
+    if repository is not None:
+        try:
+            checks["database"] = await repository.healthcheck()
+        except Exception:
+            logger.exception("Health check: database unreachable")
+    return checks
 
 
 @app.get("/health")
-async def health() -> dict:
-    return {"status": "ok"}
+async def health() -> JSONResponse:
+    """Liveness/readiness: consumer started, outbox sender task alive, DB reachable."""
+    checks = await _collect_health_checks(app)
+    healthy = all(checks.values())
+    status_code = 200 if healthy else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": "ok" if healthy else "degraded", "checks": checks},
+    )

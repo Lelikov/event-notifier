@@ -4,17 +4,23 @@ version = "0.1.0"
 description = "Notification dispatch service"
 requires-python = ">=3.14"
 dependencies = [
+    "alembic>=1.15.0",
     "asyncpg>=0.30.0",
     "cloudevents>=1.12.0",
     "dishka>=1.8.0",
-    "event-schemas @ git+https://github.com/Lelikov/event-schemas.git",
+    "event-schemas",
     "fastapi>=0.135.1",
     "faststream[rabbit]>=0.6.7",
     "httpx>=0.28.0",
+    "jinja2>=3.1.6",
     "pydantic-settings>=2.13.1",
+    "sqlalchemy[asyncio]>=2.0.0",
     "structlog>=25.5.0",
     "uvicorn>=0.41.0",
 ]
+
+[tool.uv.sources]
+event-schemas = { path = "../event-schemas", editable = true }
 
 [dependency-groups]
 dev = [

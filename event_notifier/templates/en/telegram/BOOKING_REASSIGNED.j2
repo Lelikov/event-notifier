@@ -1,0 +1,4 @@
+👤 <b>Meeting reassigned.</b>
+{% if start_time %}Time: {{ start_time_local or start_time }}{% if start_time_local and time_zone %} ({{ time_zone }}){% endif %}
+{% endif %}{% if organizer_name %}New organizer: {{ organizer_name }}
+{% endif %}

@@ -1,0 +1,4 @@
+⏰ <b>Meeting reminder.</b>
+{% if start_time %}Starts: {{ start_time_local or start_time }}{% if start_time_local and time_zone %} ({{ time_zone }}){% endif %}
+{% endif %}{% if meeting_url %}Link: {{ meeting_url }}
+{% endif %}

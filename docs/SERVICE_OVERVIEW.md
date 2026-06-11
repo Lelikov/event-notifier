@@ -1,133 +1,123 @@
 # event-notifier Service Overview
 
-> **Maturity: EARLY / PRE-PRODUCTION**
->
-> This service has passed a full audit and critical fixes have been applied (queue
-> name alignment, FCM fields made optional, FOR UPDATE wrapped in a transaction,
-> contact resolution now raises on transient errors, DLQ binding added, explicit
-> HTTP timeouts, processed_events cleanup task). However, remaining gaps exist --
-> see "Known Limitations" at the bottom of this document.
+> **Maturity: PRE-PRODUCTION.** Redesigned in audit-v2 (2026-06-11): the
+> DB-driven routing-rules machinery was deleted; the service now executes
+> `notification.send_requested` commands whose recipients come from the payload.
+> See `docs/AUDIT.md` for the findings → fixes ledger.
 
 ## Domain
 
-Notification fan-out dispatcher. Receives domain events from the booking
-lifecycle, resolves recipients via routing rules and contact lookups, writes
-delivery tasks to a transactional outbox, and asynchronously delivers through
-multiple channels.
+Notification dispatcher. Consumes `notification.send_requested` CloudEvents from
+RabbitMQ, resolves each recipient's delivery channels, writes delivery tasks to a
+transactional outbox, delivers them asynchronously via UniSender Go (email) and
+Telegram Bot API, and publishes `notification.*.message_sent` delivery-result
+events back to event-receiver.
 
 ## Request Flow
 
 ```
-RabbitMQ topic exchange ("events")
-  queue: events.notification.commands
-  binding key: events.notification.commands
+RabbitMQ topic exchange "events"
+  queue: events.notification.commands      (spec: event_schemas.queues.NOTIFICATION_COMMANDS_QUEUE)
+  DLQ:   events.notification.commands.dlq  (via events.dlx, declared idempotently at startup)
         |
         v
-NotificationConsumer                       (adapters/consumer.py:14-88)
-  - parses CloudEvent (cloudevents-sdk from_http)
-  - filters by DOMAIN_EVENT_TO_TRIGGER map (event_types.py:9-15)
-  - constructs DomainEvent frozen dataclass
+NotificationConsumer                        (adapters/consumer.py)
+  - binary CloudEvent -> EventEnvelope {original, normalized}
+  - original validated as NotificationCommandPayload (trigger_event, recipients, template_data)
+  - recipients merged with receiver-resolved user_id/time_zone from normalized.participants
+  - ack policy: poison -> RejectMessage (DLQ); transient -> in-process backoff
+    then NackMessage(requeue=True); unknown event type -> ACK + warning
         |
         v
-ProcessDomainEventUseCase                  (application/use_cases/process_domain_event.py:15-102)
-  - idempotency check via processed_events table
-  - loads routing_rules from DB for event_type
-  - apply_routing_rules extracts (user_id, role) from event data (domain/services/routing.py:22-40)
-  - per recipient: UsersClient.get_contacts_by_id() -> list[ChannelContact]
-  - writes all outbox records + marks processed_events in one DB transaction
+ProcessNotificationCommandUseCase           (application/use_cases/process_notification_command.py)
+  - idempotency: processed_events claim + outbox insert in ONE transaction
+  - email contact always from the command recipient itself
+  - user_id known -> UsersClient GET /api/users/id/{user_id} ADDS telegram channel
+    (404 degrades to email-only; transport/5xx raises -> NACK/retry)
+  - template_context localized per recipient (start_time_local/end_time_local/time_zone)
+  - zero contacts -> explicit "no_contacts" outcome (claimed + structured warning)
         |
         v
-notification_outbox table (PostgreSQL)
+notification_outbox (PostgreSQL)
+        |  poll (1s, idle-backoff to 30s); stale 'processing' reaped to 'pending' every 60s
+        v
+OutboxSender                                (adapters/outbox_sender.py)
+  - claims batches: UPDATE ... 'processing' WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED)
+  - permanent failure (non-retryable 4xx, missing template, unknown channel/trigger) -> 'failed'
+  - transient failure (408/429/5xx/transport) -> capped exponential backoff
+    (10s doubling, cap 30 min, max_retries=10)
+  - success -> 'delivered' + DeliveryResultPublisher fires notification.*.message_sent
         |
-        v (poll every 1 s)
-OutboxSender                               (adapters/outbox_sender.py:20-127)
-  - fetch_pending_outbox (SELECT ... FOR UPDATE SKIP LOCKED inside txn)
-  - per record: resolve channel adapter, call channel.send()
-  - on success: mark_delivered
-  - on failure: mark_retry (exponential backoff) or mark_failed after max_retries
-        |
-        +---> EmailChannel    (infrastructure/channels/email.py)
-        +---> TelegramChannel (infrastructure/channels/telegram.py)
-        +---> (PushChannel    -- wired but disabled; FCM credentials optional)
+        +--> EmailChannel    UniSender Go send.json (template UUIDs from UNISENDER_TEMPLATE_IDS)
+        +--> TelegramChannel Bot API sendMessage (Jinja2: templates/<locale>/telegram/<TRIGGER>.j2)
+        +--> (PushChannel    FCM HTTP v1 -- implemented, NOT registered: credentials pending)
 ```
+
+## Database
+
+Alembic owns the schema (`alembic/versions/`); ORM models (`db/models.py`) exist only
+for autogenerate. All queries are raw `text()` SQL via `SqlExecutor` (`adapters/sql.py`),
+which opens a fresh `AsyncSession` per operation (safe across concurrent tasks) and
+exposes `transaction()` for multi-statement atomic units.
+
+Tables: `processed_events` (idempotency, 7-day TTL cleanup loop), `notification_outbox`
+(status: pending/processing/delivered/failed, enforced by CHECK constraint).
 
 ## Channels
 
-| Channel | Provider | Template mechanism | Reference |
-|---------|----------|--------------------|-----------|
-| Email | UniSender Go transactional API | `_TEMPLATE_MAP` maps trigger_event to UniSender template_id | `infrastructure/channels/email.py:13-20` |
-| Telegram | Telegram Bot API `/sendMessage` | `_MESSAGE_TEMPLATES` maps trigger_event to hardcoded Russian strings | `infrastructure/channels/telegram.py:12-19` |
-| Push (disabled) | FCM HTTP v1 | `_PUSH_TITLES` maps trigger_event to title strings; body from template_data | `infrastructure/channels/push.py:12-18` |
+| Channel | Provider | Template mechanism |
+|---------|----------|--------------------|
+| Email | UniSender Go transactional API | `UNISENDER_TEMPLATE_IDS` config maps locale -> TriggerEvent value -> template UUID (flat legacy form = default locale); flat scalar `global_substitutions` |
+| Telegram | Telegram Bot API `/sendMessage` | Jinja2 file per locale and trigger: `event_notifier/templates/<locale>/telegram/<TRIGGER_EVENT>.j2` (ru + en shipped) |
+| Push (not registered) | FCM HTTP v1 | `_PUSH_TITLES` map; enable in `ioc.py` once FCM credentials exist |
 
-## Template Mapping
+All channels classify failures into `DeliveryResult.retryable`:
+408/429/5xx/transport -> transient (retry), other 4xx and missing templates -> permanent.
+Unknown triggers fail permanently — nothing internal is ever sent to end users.
 
-The consumer maps CloudEvent `type` to a `trigger_event` string via `DOMAIN_EVENT_TO_TRIGGER` (`event_types.py:9-15`):
+## Per-Recipient Localization
 
-| CloudEvent type | trigger_event |
-|-----------------|---------------|
-| `booking.created` | `BOOKING_CREATED` |
-| `booking.cancelled` | `BOOKING_CANCELLED` |
-| `booking.rescheduled` | `BOOKING_RESCHEDULED` |
-| `booking.reassigned` | `BOOKING_REASSIGNED` |
-| `booking.reminder_sent` | `BOOKING_REMINDER` |
+`normalized.participants[].time_zone` (IANA) is resolved onto each recipient. The use
+case adds `start_time_local` / `end_time_local` (recipient zone, `%d.%m.%Y %H:%M`) and
+`time_zone` to that recipient's `template_context`; original keys are untouched.
+Language: the recipient's locale (producer `recipients[].locale`, fallback
+`normalized.participants[].locale`; originally cal.com `language.locale`) is added as
+`template_context["locale"]`. Channels pick the template language from it with
+fallback to `DEFAULT_LOCALE` (default `ru`).
 
-Each channel independently maps the trigger_event to a provider-specific template/message.
-Email and Telegram templates also contain `BOOKING_REJECTED` which is currently unreachable
-(no routing rule or DOMAIN_EVENT_TO_TRIGGER entry for `booking.rejected`).
+## Health
 
-## Adding a New Channel (step-by-step)
-
-1. **Define the ChannelType** -- add an enum value to `ChannelType` in `domain/models/notification.py:8-11` (if not already present).
-2. **Implement the channel** -- create `infrastructure/channels/<name>.py` implementing `INotificationChannel` protocol (`interfaces/channels.py:6-13`). The `send()` method receives a `ChannelContact`, `trigger_event` string, and `template_data` dict; returns a `DeliveryResult`.
-3. **Register in DI** -- add a `provide_<name>_channel` method in `ioc.py` and inject it into `provide_outbox_sender`'s `channels` dict.
-4. **Update UsersClient** -- ensure `get_contacts_by_id` (`infrastructure/users_client.py:71-121`) returns `ChannelContact` entries for the new channel type (may require extending event-users' response).
-5. **Add templates** -- populate the channel's internal template map for each trigger_event string.
-6. **Update event_types.py** -- add a `NOTIFICATION_<CHANNEL>_SENT` constant for delivery result events (when publishing is implemented).
-
-## Runtime Dependencies
-
-| Dependency | Purpose | Config var |
-|-----------|---------|------------|
-| RabbitMQ | Consume domain events | `RABBIT_URL`, `RABBIT_EXCHANGE`, `NOTIFICATIONS_QUEUE` |
-| PostgreSQL | Routing rules, outbox, idempotency tracking | `DATABASE_URL` |
-| event-users (HTTP) | Resolve user contacts by UUID | `EVENT_USERS_URL`, `EVENT_USERS_TOKEN` |
-| UniSender Go API | Send transactional email | `UNISENDER_API_KEY`, `UNISENDER_FROM_EMAIL`, `UNISENDER_FROM_NAME` |
-| Telegram Bot API | Send Telegram messages | `TELEGRAM_BOT_TOKEN` |
-| FCM (optional) | Push notifications (disabled) | `FCM_PROJECT_ID`, `FCM_SERVICE_ACCOUNT_JSON` |
+`GET /health` returns 200/503 with per-check booleans: consumer started, outbox-sender
+task alive, database reachable.
 
 ## Environment Variables
 
 ```
-RABBIT_URL              # amqp://... (default: amqp://guest:guest@localhost:5672/)
-RABBIT_EXCHANGE         # topic exchange name (default: "events")
-NOTIFICATIONS_QUEUE     # queue to consume (default: "events.notification.commands")
-DATABASE_URL            # PostgreSQL DSN (required, no default)
-EVENT_USERS_URL         # base URL of event-users service (required)
-EVENT_USERS_TOKEN       # Bearer token for event-users API (required)
-UNISENDER_API_KEY       # UniSender Go API key (required)
-UNISENDER_FROM_EMAIL    # sender email address (required)
-UNISENDER_FROM_NAME     # sender display name (default: "Notifications")
-TELEGRAM_BOT_TOKEN      # Telegram bot token (required)
-FCM_PROJECT_ID          # Firebase project ID (optional, None)
-FCM_SERVICE_ACCOUNT_JSON# Firebase service account JSON (optional, None)
-DEBUG                   # enable console log rendering (default: false)
-LOG_LEVEL               # structlog level (default: "INFO")
+RABBIT_URL                  # default amqp://guest:guest@localhost:5672/
+RABBIT_EXCHANGE             # default "events"; queue name/args fixed by event_schemas.queues
+CONSUMER_PREFETCH_COUNT     # per-channel QoS, default 10
+GRACEFUL_TIMEOUT            # broker graceful shutdown, default 30s
+DATABASE_URL                # postgresql+asyncpg:// (required)
+EVENT_USERS_URL             # required
+EVENT_USERS_TOKEN           # required (Bearer)
+EVENTS_ENDPOINT_URL         # optional; unset disables delivery-result publishing
+EVENTS_API_KEY              # auth for EVENTS_ENDPOINT_URL
+UNISENDER_API_KEY           # required (sent as X-API-KEY header, never in body)
+UNISENDER_FROM_EMAIL        # required
+UNISENDER_FROM_NAME         # default "Notifications"
+UNISENDER_TEMPLATE_IDS      # JSON dict: locale -> {TriggerEvent value -> UniSender template UUID}
+                            # (legacy flat {TriggerEvent: UUID} form = default locale)
+DEFAULT_LOCALE              # default template language, default "ru"
+TELEGRAM_BOT_TOKEN          # required
+FCM_PROJECT_ID              # optional (PushChannel not registered)
+FCM_SERVICE_ACCOUNT_JSON    # optional
+DEBUG / LOG_LEVEL           # logging
 ```
 
-Reference: `config.py:1-33`
+## Known Limitations
 
-## Known Limitations / Remaining Production Readiness Gaps
-
-1. **Delivery result events NOT published** -- `event_types.py` defines `NOTIFICATION_EMAIL_SENT` / `NOTIFICATION_TELEGRAM_SENT` / `NOTIFICATION_PUSH_SENT` constants, and event-receiver has routing rules for `events.notification.delivery` queue, but `OutboxSender` never publishes these events after delivery. See TODO at `adapters/outbox_sender.py:92-93`.
-
-2. **No consumer-level integration tests** -- `NotificationConsumer` (`adapters/consumer.py`) has zero test coverage. CloudEvent parsing logic and event type filtering are untested.
-
-3. **Telegram fallback leaks trigger_event** -- unknown trigger_event strings produce a user-visible "notification: BOOKING_REJECTED" message instead of failing cleanly (`infrastructure/channels/telegram.py:34`).
-
-4. **Outbox polling has no backoff** -- polls DB every 1 second even when empty (`adapters/outbox_sender.py:48`). Under quiet periods this is unnecessary load.
-
-5. **`BOOKING_REJECTED` template unreachable** -- email and telegram channels define templates for this trigger, but no routing rule or DOMAIN_EVENT_TO_TRIGGER entry exists.
-
-6. **`get_contacts_by_email` is dead code** -- method exists in `UsersClient` and interface but is never called by `ProcessDomainEventUseCase`.
-
-7. **NOTIFICATION_SERVICE_ARCHITECTURE.md is stale** -- describes a completely different design (meeting.* events, Jinja2, WhatsApp, aiohttp). Should be archived.
+1. **PushChannel not registered** — code and retry classification ready; needs FCM
+   credentials, an IoC provider and an access-token provider implementation.
+2. **Operator redrive of `failed` rows is manual SQL** —
+   `UPDATE notification_outbox SET status='pending', retry_count=0 WHERE status='failed' AND ...`.
+3. **No metrics** — observability is structured logs only.

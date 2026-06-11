@@ -1,0 +1,5 @@
+🔁 <b>Meeting rescheduled.</b>
+{% if previous_start_time %}Was: {{ previous_start_time }}
+{% endif %}{% if start_time %}New time: {{ start_time_local or start_time }}{% if start_time_local and time_zone %} ({{ time_zone }}){% endif %}
+{% endif %}{% if meeting_url %}Link: {{ meeting_url }}
+{% endif %}

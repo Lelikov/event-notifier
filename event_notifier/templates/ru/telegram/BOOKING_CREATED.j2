@@ -1,0 +1,6 @@
+📅 <b>Новая встреча забронирована.</b>
+{% if start_time %}Начало: {{ start_time_local or start_time }}{% if start_time_local and time_zone %} ({{ time_zone }}){% endif %}
+{% endif %}{% if end_time %}Окончание: {{ end_time_local or end_time }}
+{% endif %}{% if organizer_name %}Организатор: {{ organizer_name }}
+{% endif %}{% if meeting_url %}Ссылка: {{ meeting_url }}
+{% endif %}
