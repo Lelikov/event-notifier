@@ -13,9 +13,9 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
 
+    # Queue name/args come from event_schemas.queues.NOTIFICATION_COMMANDS_QUEUE
     rabbit_url: AmqpDsn = "amqp://guest:guest@localhost:5672/"
     rabbit_exchange: str = "events"
-    notifications_queue: str = "events.notification.commands"
 
     database_url: PostgresDsn = Field(strict=True)
 

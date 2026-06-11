@@ -32,7 +32,7 @@ Messages arrive as binary-mode CloudEvents. Headers carry CE attributes; body is
 
 | Header | Fallback |
 |--------|----------|
-| `ce-booking_id` | Falls back to `data.booking_id` if absent (`consumer.py:69`) |
+| `ce-bookingid` | Canonical attribute (event_schemas.attributes); falls back to `original.booking_id` |
 
 ### Accepted event types
 

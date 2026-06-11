@@ -99,7 +99,7 @@ Email and Telegram templates also contain `BOOKING_REJECTED` which is currently 
 
 | Dependency | Purpose | Config var |
 |-----------|---------|------------|
-| RabbitMQ | Consume domain events | `RABBIT_URL`, `RABBIT_EXCHANGE`, `NOTIFICATIONS_QUEUE` |
+| RabbitMQ | Consume domain events | `RABBIT_URL`, `RABBIT_EXCHANGE` (queue spec from `event_schemas.queues`) |
 | PostgreSQL | Routing rules, outbox, idempotency tracking | `DATABASE_URL` |
 | event-users (HTTP) | Resolve user contacts by UUID | `EVENT_USERS_URL`, `EVENT_USERS_TOKEN` |
 | UniSender Go API | Send transactional email | `UNISENDER_API_KEY`, `UNISENDER_FROM_EMAIL`, `UNISENDER_FROM_NAME` |
@@ -111,7 +111,6 @@ Email and Telegram templates also contain `BOOKING_REJECTED` which is currently 
 ```
 RABBIT_URL              # amqp://... (default: amqp://guest:guest@localhost:5672/)
 RABBIT_EXCHANGE         # topic exchange name (default: "events")
-NOTIFICATIONS_QUEUE     # queue to consume (default: "events.notification.commands")
 DATABASE_URL            # PostgreSQL DSN (required, no default)
 EVENT_USERS_URL         # base URL of event-users service (required)
 EVENT_USERS_TOKEN       # Bearer token for event-users API (required)

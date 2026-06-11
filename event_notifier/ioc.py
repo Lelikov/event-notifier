@@ -124,12 +124,10 @@ class AppProvider(Provider):
         self,
         broker: RabbitBroker,
         exchange: RabbitExchange,
-        settings: Settings,
         use_case: ProcessDomainEventUseCase,
     ) -> NotificationConsumer:
         return NotificationConsumer(
             broker=broker,
             exchange=exchange,
-            queue_name=settings.notifications_queue,
             use_case=use_case,
         )

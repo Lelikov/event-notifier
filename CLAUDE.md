@@ -99,7 +99,6 @@ OutboxSender (adapters/outbox_sender.py)
 DATABASE_URL                # postgresql+asyncpg://user:pass@host/db (required)
 RABBIT_URL                  # amqp://... (default: amqp://guest:guest@localhost:5672/)
 RABBIT_EXCHANGE             # default: "events"
-NOTIFICATIONS_QUEUE         # default: "events.notification.commands"
 EVENT_USERS_URL             # required
 EVENT_USERS_TOKEN           # required
 UNISENDER_API_KEY           # required

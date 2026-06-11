@@ -8,7 +8,7 @@
 |----------|-------|
 | Role | Message ingress (domain events) |
 | Protocol | AMQP 0-9-1 |
-| Config | `RABBIT_URL`, `RABBIT_EXCHANGE`, `NOTIFICATIONS_QUEUE` |
+| Config | `RABBIT_URL`, `RABBIT_EXCHANGE` (queue spec from `event_schemas.queues`) |
 | Client | FastStream `RabbitBroker` |
 | Connection lifetime | App-scoped (created in lifespan, closed on shutdown) |
 
