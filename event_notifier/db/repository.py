@@ -72,7 +72,7 @@ class NotificationRepository:
                          recipient_address, recipient_role, channel, trigger_event, template_context)
                     VALUES (:idempotency_key, :cloud_event_id, :booking_id, :user_id, :recipient_email,
                             :recipient_address, :recipient_role, :channel, :trigger_event,
-                            :template_context::jsonb)
+                            CAST(:template_context AS JSONB))
                     ON CONFLICT (idempotency_key) DO NOTHING
                     """,
                     {
@@ -133,7 +133,7 @@ class NotificationRepository:
 
     async def mark_delivered(self, record_id: str) -> None:
         await self._sql.execute(
-            "UPDATE notification_outbox SET status='delivered', updated_at=NOW() WHERE id=:id::uuid",
+            "UPDATE notification_outbox SET status='delivered', updated_at=NOW() WHERE id=CAST(:id AS UUID)",
             {"id": record_id},
         )
 
@@ -146,7 +146,7 @@ class NotificationRepository:
                 status = 'pending',
                 last_error = :error,
                 updated_at = NOW()
-            WHERE id = :id::uuid
+            WHERE id = CAST(:id AS UUID)
             """,
             {"id": record_id, "retry_count": retry_count, "delay": str(delay_seconds), "error": error},
         )
@@ -156,7 +156,8 @@ class NotificationRepository:
         UPDATE notification_outbox SET status='pending', retry_count=0 WHERE status='failed' AND ...;
         """
         await self._sql.execute(
-            "UPDATE notification_outbox SET status='failed', last_error=:error, updated_at=NOW() WHERE id=:id::uuid",
+            "UPDATE notification_outbox SET status='failed', last_error=:error, updated_at=NOW() "
+            "WHERE id=CAST(:id AS UUID)",
             {"id": record_id, "error": error},
         )
 

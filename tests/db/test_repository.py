@@ -118,3 +118,18 @@ async def test_mark_failed_stores_last_error():
     query, values = sql.statements[0]
     assert "last_error" in query
     assert values["error"] == "boom"
+
+
+def test_no_bind_param_is_immediately_followed_by_pg_cast():
+    # Regression: sqlalchemy text() does NOT recognize ":param::type" as a
+    # bind parameter (the lookahead requires a non-colon after the name), so
+    # ":template_context::jsonb" reached postgres literally and every outbox
+    # insert failed with a syntax error. Use CAST(:param AS TYPE) instead.
+    import inspect
+    import re
+
+    import event_notifier.db.repository as repository
+
+    source = inspect.getsource(repository)
+    offenders = re.findall(r":\w+::\w+", source)
+    assert not offenders, f"bind params followed by :: cast break sqlalchemy text(): {offenders}"
