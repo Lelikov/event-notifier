@@ -1,7 +1,14 @@
-"""Email notification channel via UniSender Go transactional API."""
+"""Email notification channel via UniSender Go transactional API.
+
+External contract (hard invariant): POST /ru/transactional/api/v1/email/send.json
+with the API key in the X-API-KEY header (never in the body, never logged) and
+``message.template_id`` set to a real template UUID provisioned in UniSender Go
+and supplied via UNISENDER_TEMPLATE_IDS config.
+"""
 
 from typing import Any
 
+import httpx
 import structlog
 from event_schemas.types import TriggerEvent
 from httpx import AsyncClient, HTTPStatusError
@@ -10,17 +17,22 @@ from event_notifier.domain.models.notification import ChannelContact, ChannelTyp
 
 logger = structlog.get_logger(__name__)
 
-# Maps trigger_event → UniSender template code.
-_TEMPLATE_MAP: dict[TriggerEvent, str] = {
-    TriggerEvent.BOOKING_CREATED: "booking_created",
-    TriggerEvent.BOOKING_CANCELLED: "booking_cancelled",
-    TriggerEvent.BOOKING_RESCHEDULED: "booking_rescheduled",
-    TriggerEvent.BOOKING_REASSIGNED: "booking_reassigned",
-    TriggerEvent.BOOKING_REMINDER: "booking_reminder",
-    TriggerEvent.BOOKING_REJECTED: "booking_rejected",
-}
+UNISENDER_SEND_PATH = "/ru/transactional/api/v1/email/send.json"
 
-_UNISENDER_URL = "/ru/transactional/api/v1/email/send.json"
+_RETRYABLE_STATUS_CODES = frozenset({408, 429})
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code in _RETRYABLE_STATUS_CODES or status_code >= 500
+
+
+def flatten_substitutions(template_data: dict[str, Any]) -> dict[str, str]:
+    """Only scalar key/values reach global_substitutions.
+
+    Drops nested structures (the recipients list, dicts) so templates always get
+    flat values and no PII-bearing collections leak into the provider payload.
+    """
+    return {k: str(v) for k, v in template_data.items() if isinstance(v, str | int | float | bool)}
 
 
 class EmailChannel:
@@ -28,12 +40,12 @@ class EmailChannel:
         self,
         *,
         http_client: AsyncClient,
-        api_key: str,
+        template_ids: dict[str, str],
         from_email: str,
         from_name: str,
     ) -> None:
         self._client = http_client
-        self._api_key = api_key
+        self._template_ids = template_ids
         self._from_email = from_email
         self._from_name = from_name
 
@@ -44,36 +56,38 @@ class EmailChannel:
         trigger_event: TriggerEvent,
         template_data: dict[str, Any],
     ) -> DeliveryResult:
-        template_code = _TEMPLATE_MAP.get(trigger_event)
-        if not template_code:
+        template_id = self._template_ids.get(trigger_event.value)
+        if not template_id:
             return DeliveryResult(
                 channel=ChannelType.EMAIL,
                 success=False,
-                error=f"No email template for trigger_event={trigger_event}",
+                retryable=False,
+                error=f"No UniSender template configured for trigger_event={trigger_event.value}",
             )
 
         payload = {
-            "api_key": self._api_key,
             "message": {
-                "template_id": template_code,
+                "template_id": template_id,
                 "recipients": [{"email": contact.contact_id}],
                 "from_email": self._from_email,
                 "from_name": self._from_name,
-                "global_substitutions": template_data,
+                "global_substitutions": flatten_substitutions(template_data),
             },
         }
 
         try:
-            response = await self._client.post(_UNISENDER_URL, json=payload)
+            response = await self._client.post(UNISENDER_SEND_PATH, json=payload)
             response.raise_for_status()
-            body = response.json()
-            job_id = body.get("job_id")
-            logger.info("Email sent", to=contact.contact_id, trigger=trigger_event, job_id=job_id)
-            return DeliveryResult(channel=ChannelType.EMAIL, success=True, message_id=job_id)
         except HTTPStatusError as exc:
             error = f"UniSender HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-            logger.warning("Email send failed", to=contact.contact_id, error=error)
-            return DeliveryResult(channel=ChannelType.EMAIL, success=False, error=error)
-        except Exception as exc:
-            logger.exception("Email send unexpected error", to=contact.contact_id)
-            return DeliveryResult(channel=ChannelType.EMAIL, success=False, error=str(exc))
+            retryable = _is_retryable_status(exc.response.status_code)
+            logger.warning("Email send failed", to=contact.contact_id, error=error, retryable=retryable)
+            return DeliveryResult(channel=ChannelType.EMAIL, success=False, error=error, retryable=retryable)
+        except httpx.HTTPError as exc:
+            logger.warning("Email send transport error", to=contact.contact_id, error=str(exc))
+            return DeliveryResult(channel=ChannelType.EMAIL, success=False, error=str(exc), retryable=True)
+
+        body = response.json()
+        job_id = body.get("job_id")
+        logger.info("Email sent", to=contact.contact_id, trigger=trigger_event.value, job_id=job_id)
+        return DeliveryResult(channel=ChannelType.EMAIL, success=True, message_id=job_id)
