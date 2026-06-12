@@ -59,7 +59,7 @@ OutboxSender (adapters/outbox_sender.py)
 
 | Layer | Path | Responsibility |
 |---|---|---|
-| Entry point | `main.py` | FastAPI lifespan: consumer, outbox-sender task, processed_events TTL loop, deep `/health` |
+| Entry point | `main.py` | FastAPI lifespan: consumer, outbox-sender task, processed_events TTL loop, `/health` (liveness) + `/ready` (readiness checks) |
 | DI | `ioc.py` | Dishka `AppProvider` (APP scope; per-operation sessions via sessionmaker) |
 | Config | `config.py` | `pydantic-settings`; `DATABASE_URL` must be `postgresql+asyncpg://` |
 | DB models | `db/models.py` | ORM only for Alembic autogenerate (not used for queries) |

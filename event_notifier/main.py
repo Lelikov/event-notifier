@@ -99,12 +99,18 @@ async def _collect_health_checks(application: FastAPI) -> dict[str, bool]:
 
 
 @app.get("/health")
-async def health() -> JSONResponse:
-    """Liveness/readiness: consumer started, outbox sender task alive, DB reachable."""
+async def health() -> dict[str, str]:
+    """Liveness probe: the process is up and serving HTTP. No dependency calls."""
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready() -> JSONResponse:
+    """Readiness probe: consumer started, outbox sender task alive, DB reachable."""
     checks = await _collect_health_checks(app)
-    healthy = all(checks.values())
-    status_code = 200 if healthy else 503
+    ready_ok = all(checks.values())
+    status_code = 200 if ready_ok else 503
     return JSONResponse(
         status_code=status_code,
-        content={"status": "ok" if healthy else "degraded", "checks": checks},
+        content={"status": "ready" if ready_ok else "not_ready", "checks": checks},
     )

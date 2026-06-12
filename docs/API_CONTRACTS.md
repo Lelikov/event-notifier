@@ -129,4 +129,5 @@ logged and never retried (the notification itself is already delivered).
 
 | Method | Path | Response |
 |--------|------|----------|
-| GET | `/health` | 200 `{"status":"ok","checks":{...}}` / 503 `{"status":"degraded",...}` — checks: consumer, outbox_sender, database |
+| GET | `/health` | Liveness probe (k8s `livenessProbe`): always 200 `{"status":"ok"}`; no dependency calls |
+| GET | `/ready` | Readiness probe (k8s `readinessProbe`): 200 `{"status":"ready","checks":{...}}` / 503 `{"status":"not_ready","checks":{...}}` — checks: consumer, outbox_sender, database |
