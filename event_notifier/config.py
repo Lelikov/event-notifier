@@ -1,5 +1,8 @@
-from pydantic import AmqpDsn, AnyHttpUrl, Field, PostgresDsn
+from event_schemas.types import TriggerEvent
+from pydantic import AmqpDsn, AnyHttpUrl, Field, PostgresDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_KNOWN_TRIGGERS = frozenset(trigger.value for trigger in TriggerEvent)
 
 
 class Settings(BaseSettings):
@@ -42,6 +45,22 @@ class Settings(BaseSettings):
     # or locale-keyed (preferred):
     #   UNISENDER_TEMPLATE_IDS={"ru": {"BOOKING_CREATED": "aaaa-..."}, "en": {"BOOKING_CREATED": "bbbb-..."}}
     unisender_template_ids: dict[str, str | dict[str, str]] = Field(default_factory=dict)
+
+    @field_validator("unisender_template_ids")
+    @classmethod
+    def validate_template_id_triggers(cls, value: dict[str, str | dict[str, str]]) -> dict[str, str | dict[str, str]]:
+        """Fail fast on trigger-event typos: every template key must be a known TriggerEvent value."""
+        for key, entry in value.items():
+            if isinstance(entry, dict):
+                unknown = sorted(set(entry) - _KNOWN_TRIGGERS)
+                if unknown:
+                    msg = f"UNISENDER_TEMPLATE_IDS[{key!r}] has unknown trigger events: {unknown}"
+                    raise ValueError(msg)
+                continue
+            if key not in _KNOWN_TRIGGERS:
+                msg = f"UNISENDER_TEMPLATE_IDS has unknown trigger event {key!r}"
+                raise ValueError(msg)
+        return value
 
     def unisender_template_ids_by_locale(self) -> dict[str, dict[str, str]]:
         """Normalize UNISENDER_TEMPLATE_IDS to {locale: {TRIGGER_EVENT: template_id}}.

@@ -14,8 +14,12 @@ from event_notifier.infrastructure.channels.email import EmailChannel, flatten_s
 SEND_URL = "https://go.unisender.ru/ru/transactional/api/v1/email/send.json"
 
 TEMPLATE_IDS_BY_LOCALE = {
-    "ru": {"BOOKING_CREATED": "tmpl-uuid-created", "BOOKING_CANCELLED": "tmpl-uuid-cancelled"},
-    "en": {"BOOKING_CREATED": "tmpl-uuid-created-en"},
+    "ru": {
+        "BOOKING_CREATED": "tmpl-uuid-created",
+        "BOOKING_CANCELLED": "tmpl-uuid-cancelled",
+        "BOOKING_REJECTED_BLACKLISTED": "tmpl-uuid-blacklisted-ru",
+    },
+    "en": {"BOOKING_CREATED": "tmpl-uuid-created-en", "BOOKING_REJECTED_BLACKLISTED": "tmpl-uuid-blacklisted-en"},
 }
 
 
@@ -115,6 +119,26 @@ async def test_locale_without_own_template_falls_back_to_default_locale(email_ch
     assert result.success is True
     body = json.loads(route.calls[0].request.content)
     assert body["message"]["template_id"] == "tmpl-uuid-cancelled"
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_template_id"),
+    [("ru", "tmpl-uuid-blacklisted-ru"), ("en", "tmpl-uuid-blacklisted-en"), (None, "tmpl-uuid-blacklisted-ru")],
+)
+async def test_blacklisted_rejection_template_selected_by_locale(email_channel, contact, locale, expected_template_id):
+    with respx.mock:
+        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"status": "success", "job_id": "j-bl"}))
+
+        template_data = {} if locale is None else {"locale": locale}
+        result = await email_channel.send(
+            contact=contact,
+            trigger_event=TriggerEvent.BOOKING_REJECTED_BLACKLISTED,
+            template_data=template_data,
+        )
+
+    assert result.success is True
+    body = json.loads(route.calls[0].request.content)
+    assert body["message"]["template_id"] == expected_template_id
 
 
 async def test_missing_locale_uses_default_locale_template(email_channel, contact):

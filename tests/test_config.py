@@ -72,6 +72,29 @@ def test_both_config_shapes_validate(value):
     assert make_settings(unisender_template_ids=value).unisender_template_ids == value
 
 
+def test_blacklisted_rejection_trigger_is_accepted_per_locale():
+    settings = make_settings(
+        unisender_template_ids={
+            "ru": {"BOOKING_REJECTED_BLACKLISTED": "tmpl-bl-ru"},
+            "en": {"BOOKING_REJECTED_BLACKLISTED": "tmpl-bl-en"},
+        }
+    )
+
+    by_locale = settings.unisender_template_ids_by_locale()
+    assert by_locale["ru"]["BOOKING_REJECTED_BLACKLISTED"] == "tmpl-bl-ru"
+    assert by_locale["en"]["BOOKING_REJECTED_BLACKLISTED"] == "tmpl-bl-en"
+
+
+def test_unknown_trigger_in_locale_dict_is_rejected():
+    with pytest.raises(ValueError, match="unknown trigger events"):
+        make_settings(unisender_template_ids={"ru": {"BOOKING_TYPO": "tmpl-1"}})
+
+
+def test_unknown_flat_trigger_is_rejected():
+    with pytest.raises(ValueError, match="unknown trigger event"):
+        make_settings(unisender_template_ids={"BOOKING_TYPO": "tmpl-1"})
+
+
 def test_external_api_base_urls_default_to_production():
     settings = make_settings()
 

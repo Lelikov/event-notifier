@@ -123,6 +123,12 @@ logged and never retried (the notification itself is already delivered).
   `templates/<locale>/telegram/<TRIGGER_EVENT>.j2` (autoescaped; recipient locale with
   fallback to `DEFAULT_LOCALE`, `ru` and `en` sets shipped)
 
+### Trigger-specific notes
+- `BOOKING_REJECTED_BLACKLISTED` (booking rejected because the client matched the
+  admin-managed blacklist) has dedicated templates per locale; the client-facing wording is
+  neutral («бронирование отклонено, обратитесь к организатору») and NEVER mentions the
+  blacklist. A `UNISENDER_TEMPLATE_IDS` entry per locale is required for email delivery.
+
 ---
 
 ## HTTP Endpoints

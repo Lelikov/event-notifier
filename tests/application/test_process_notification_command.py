@@ -26,7 +26,10 @@ def mock_users_client():
     return client
 
 
-def make_command(recipients: tuple[CommandRecipient, ...] | None = None) -> NotificationCommand:
+def make_command(
+    recipients: tuple[CommandRecipient, ...] | None = None,
+    trigger_event: str = "BOOKING_CREATED",
+) -> NotificationCommand:
     if recipients is None:
         recipients = (
             CommandRecipient(email="org@example.com", role="organizer", user_id="uuid-org"),
@@ -35,7 +38,7 @@ def make_command(recipients: tuple[CommandRecipient, ...] | None = None) -> Noti
     return NotificationCommand(
         event_id="evt-001",
         booking_id="booking-abc",
-        trigger_event="BOOKING_CREATED",
+        trigger_event=trigger_event,
         recipients=recipients,
         template_context={"start_time": "2026-06-12T10:00:00Z"},
     )
@@ -160,3 +163,19 @@ async def test_template_context_is_localized_per_recipient(mock_repository, mock
     assert by_email["org@example.com"]["time_zone"] == "Europe/Moscow"
     assert by_email["org@example.com"]["start_time"] == "2026-06-12T10:00:00Z"  # original untouched
     assert "start_time_local" not in by_email["cli@example.com"]
+
+
+async def test_blacklisted_rejection_trigger_reaches_the_outbox(mock_repository, mock_users_client):
+    """BOOKING_REJECTED_BLACKLISTED commands take the same outbox path as any other trigger."""
+    command = make_command(
+        recipients=(CommandRecipient(email="cli@example.com", role="client", user_id=None),),
+        trigger_event="BOOKING_REJECTED_BLACKLISTED",
+    )
+
+    await make_use_case(mock_repository, mock_users_client).execute(command)
+
+    mock_repository.write_outbox_atomically.assert_awaited_once()
+    records = mock_repository.write_outbox_atomically.call_args.kwargs["records"]
+    assert [r["channel"] for r in records] == ["email"]
+    assert all(r["trigger_event"] == "BOOKING_REJECTED_BLACKLISTED" for r in records)
+    assert records[0]["idempotency_key"] == "evt-001:cli@example.com:email"

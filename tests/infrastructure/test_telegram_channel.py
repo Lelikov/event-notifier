@@ -72,6 +72,31 @@ async def test_every_trigger_has_a_template_in_every_locale(telegram_channel, co
     assert result.success is True
 
 
+@pytest.mark.parametrize(
+    ("locale", "expected_fragment"),
+    [("ru", "обратитесь к организатору"), ("en", "contact the organizer")],
+)
+async def test_blacklisted_rejection_template_is_neutral(telegram_channel, contact, locale, expected_fragment):
+    """Dedicated blacklist-rejection template per locale; the wording never mentions the blacklist."""
+    with respx.mock:
+        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 7}}))
+
+        result = await telegram_channel.send(
+            contact=contact,
+            trigger_event=TriggerEvent.BOOKING_REJECTED_BLACKLISTED,
+            template_data={"locale": locale},
+        )
+
+    assert result.success is True
+    text = json.loads(route.calls[0].request.content)["text"]
+    assert expected_fragment in text
+    lowered = text.lower()
+    assert "blacklist" not in lowered
+    assert "черный список" not in lowered
+    assert "чёрный список" not in lowered
+    assert "BOOKING_REJECTED_BLACKLISTED" not in text
+
+
 async def test_en_locale_selects_english_template(telegram_channel, contact):
     with respx.mock:
         route = respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 1}}))
