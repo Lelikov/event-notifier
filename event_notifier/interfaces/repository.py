@@ -2,7 +2,7 @@
 
 from typing import Any, Protocol
 
-from event_notifier.domain.models.notification import OutboxRecord
+from event_notifier.domain.models.notification import OutboxRecord, OutboxStats
 
 
 class INotificationRepository(Protocol):
@@ -30,6 +30,10 @@ class INotificationRepository(Protocol):
     ) -> None: ...
 
     async def mark_failed(self, record_id: str, error: str | None = None) -> None: ...
+
+    async def outbox_stats(self) -> OutboxStats:
+        """Row counts by status + oldest pending age (monitoring gauges)."""
+        ...
 
     async def cleanup_processed_events(self, days: int = 7) -> None: ...
 

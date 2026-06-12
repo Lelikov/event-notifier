@@ -10,6 +10,7 @@ Ack policy (explicit, exception-driven):
 """
 
 import asyncio
+from time import perf_counter
 from typing import Any
 
 import structlog
@@ -25,6 +26,7 @@ from faststream.rabbit import Channel, ExchangeType, RabbitBroker, RabbitExchang
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as SqlTimeoutError
 
+from event_notifier import metrics
 from event_notifier.application.use_cases.process_notification_command import ProcessNotificationCommandUseCase
 from event_notifier.domain.models.notification import CommandRecipient, NotificationCommand
 from event_notifier.interfaces.users_client import UsersServiceError
@@ -189,13 +191,19 @@ class NotificationConsumer:
         logger.info("Notification consumer stopped", queue=self._queue_spec.name)
 
     async def _consume_message(self, message: Any) -> None:
+        started_at = perf_counter()
+        queue = self._queue_spec.name
+        handled_type = EventType.NOTIFICATION_SEND_REQUESTED.value
         try:
             command = parse_notification_command(headers=dict(message.headers), body=message.body)
         except Exception as exc:
+            metrics.record_message(queue=queue, event_type="unknown", outcome="rejected", started_at=started_at)
             logger.exception("Poison message (unparseable CloudEvent or invalid payload), dead-lettering")
             raise RejectMessage from exc
 
         if command is None:
+            # Unexpected event type: logged in parse_notification_command and ACKed.
+            metrics.record_message(queue=queue, event_type="unhandled", outcome="ok", started_at=started_at)
             return
 
         logger.info(
@@ -205,7 +213,15 @@ class NotificationConsumer:
             trigger_event=command.trigger_event,
             recipient_count=len(command.recipients),
         )
-        await self._execute_with_retry(command)
+        try:
+            await self._execute_with_retry(command)
+        except NackMessage:
+            metrics.record_message(queue=queue, event_type=handled_type, outcome="retried", started_at=started_at)
+            raise
+        except RejectMessage:
+            metrics.record_message(queue=queue, event_type=handled_type, outcome="rejected", started_at=started_at)
+            raise
+        metrics.record_message(queue=queue, event_type=handled_type, outcome="ok", started_at=started_at)
 
     async def _execute_with_retry(self, command: NotificationCommand) -> None:
         last_error: BaseException | None = None

@@ -4,7 +4,7 @@ import json
 
 import structlog
 
-from event_notifier.domain.models.notification import OutboxRecord
+from event_notifier.domain.models.notification import OutboxRecord, OutboxStats
 from event_notifier.interfaces.sql import ISqlExecutor
 
 logger = structlog.get_logger(__name__)
@@ -160,6 +160,27 @@ class NotificationRepository:
             "WHERE id=CAST(:id AS UUID)",
             {"id": record_id, "error": error},
         )
+
+    async def outbox_stats(self) -> OutboxStats:
+        """One cheap aggregate for the monitoring gauges: row counts by status + oldest pending age."""
+        rows = await self._sql.fetch_all(
+            """
+            SELECT status,
+                   COUNT(*) AS count,
+                   EXTRACT(EPOCH FROM (NOW() - MIN(created_at))) AS oldest_age_seconds
+            FROM notification_outbox
+            GROUP BY status
+            """,
+            {},
+        )
+        counts: dict[str, int] = {}
+        oldest_pending_age = 0.0
+        for raw_row in rows:
+            row = dict(raw_row)
+            counts[row["status"]] = int(row["count"])
+            if row["status"] == "pending" and row["oldest_age_seconds"] is not None:
+                oldest_pending_age = float(row["oldest_age_seconds"])
+        return OutboxStats(counts_by_status=counts, oldest_pending_age_seconds=oldest_pending_age)
 
     async def cleanup_processed_events(self, days: int = 7) -> None:
         """Delete processed_events older than the specified number of days."""

@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING
 import structlog
 from dishka import make_async_container
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
+from event_notifier import metrics
 from event_notifier.adapters.consumer import NotificationConsumer
 from event_notifier.adapters.outbox_sender import OutboxSender
 from event_notifier.config import Settings
@@ -102,6 +103,12 @@ async def _collect_health_checks(application: FastAPI) -> dict[str, bool]:
 async def health() -> dict[str, str]:
     """Liveness probe: the process is up and serving HTTP. No dependency calls."""
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics_endpoint() -> Response:
+    """Prometheus exposition endpoint (consumer RED, delivery counters, outbox gauges)."""
+    return metrics.metrics_response()
 
 
 @app.get("/ready")

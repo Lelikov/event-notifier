@@ -137,3 +137,19 @@ logged and never retried (the notification itself is already delivered).
 |--------|------|----------|
 | GET | `/health` | Liveness probe (k8s `livenessProbe`): always 200 `{"status":"ok"}`; no dependency calls |
 | GET | `/ready` | Readiness probe (k8s `readinessProbe`): 200 `{"status":"ready","checks":{...}}` / 503 `{"status":"not_ready","checks":{...}}` — checks: consumer, outbox_sender, database |
+| GET | `/metrics` | Prometheus exposition (`prometheus_client.generate_latest`): 200, `text/plain; version=0.0.4` |
+
+### Exposed metrics (`metrics.py`)
+
+| Metric | Type | Labels |
+|---|---|---|
+| `messages_processed_total` | counter | `queue`, `event_type` (`unknown` = unparseable, `unhandled` = unexpected type acked), `outcome` (ok/retried/rejected) |
+| `message_processing_seconds` | histogram | `queue` |
+| `notifier_deliveries_total` | counter | `channel` (email/telegram/push), `trigger` (TriggerEvent), `outcome` (delivered/retried/failed) |
+| `notifier_outbox_depth` | gauge | `status` (pending/processing/delivered/failed) — refreshed by the outbox loop on the reap cadence (60s) |
+| `notifier_outbox_oldest_pending_age_seconds` | gauge | — age of the oldest pending row, 0 when none |
+
+Outcome mapping (consumer): `ok` = outbox written (or duplicate claim skipped); `retried` =
+transient retries exhausted → NACK + requeue; `rejected` = poison → DLQ. Delivery outcomes:
+`retried` counts each scheduled backoff attempt; `failed` is terminal (permanent error or
+retries exhausted).

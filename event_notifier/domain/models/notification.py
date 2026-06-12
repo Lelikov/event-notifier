@@ -19,6 +19,14 @@ class OutboxStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class OutboxStats:
+    """Snapshot of notification_outbox for monitoring gauges."""
+
+    counts_by_status: dict[str, int]
+    oldest_pending_age_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class CommandRecipient:
     """A recipient of a notification command: email+role from the producer, user_id from the receiver."""
 

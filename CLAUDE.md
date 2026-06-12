@@ -71,6 +71,7 @@ OutboxSender (adapters/outbox_sender.py)
 | Outbox sender | `adapters/outbox_sender.py` | polling, permanent/transient classification, result publishing |
 | Result publisher | `adapters/result_publisher.py` | fire-and-forget `notification.*.message_sent` POST |
 | Interfaces | `interfaces/` | `INotificationChannel`, `IUsersClient`, `ISqlExecutor`, `INotificationRepository`, `IDeliveryResultPublisher` protocols |
+| Metrics | `metrics.py` | Prometheus: consumer RED (`messages_processed_total{queue,event_type,outcome}`, `message_processing_seconds{queue}`), `notifier_deliveries_total{channel,trigger,outcome}`, `notifier_outbox_depth{status}` + `notifier_outbox_oldest_pending_age_seconds` gauges (refreshed by the outbox loop); served at `GET /metrics` |
 | Channels | `infrastructure/channels/` | UniSender Go, Telegram, FCM (unregistered) |
 | Templates | `event_notifier/templates/<locale>/telegram/` | Jinja2 message bodies (one file per TriggerEvent per locale; `ru` default, `en` shipped) |
 

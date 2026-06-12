@@ -18,7 +18,8 @@ import asyncio
 import structlog
 from event_schemas.types import TriggerEvent
 
-from event_notifier.domain.models.notification import ChannelContact, ChannelType, OutboxRecord
+from event_notifier import metrics
+from event_notifier.domain.models.notification import ChannelContact, ChannelType, OutboxRecord, OutboxStatus
 from event_notifier.interfaces.channels import INotificationChannel
 from event_notifier.interfaces.repository import INotificationRepository
 from event_notifier.interfaces.result_publisher import IDeliveryResultPublisher
@@ -71,6 +72,7 @@ class OutboxSender:
             try:
                 if seconds_since_reap >= self._reap_interval:
                     await self._repository.reap_stale_processing(self._reap_stale_seconds)
+                    await self.refresh_outbox_gauges()
                     seconds_since_reap = 0.0
                 processed = await self.run_once()
                 self._idle_interval = self._next_idle_interval(processed)
@@ -78,6 +80,13 @@ class OutboxSender:
                 logger.exception("OutboxSender loop error")
             await asyncio.sleep(self._idle_interval)
             seconds_since_reap += self._idle_interval
+
+    async def refresh_outbox_gauges(self) -> None:
+        """Refresh outbox depth / oldest-pending-age gauges (piggybacks on the reap cadence)."""
+        stats = await self._repository.outbox_stats()
+        for status in OutboxStatus:
+            metrics.OUTBOX_DEPTH.labels(status=status.value).set(stats.counts_by_status.get(status.value, 0))
+        metrics.OUTBOX_OLDEST_PENDING_AGE.set(stats.oldest_pending_age_seconds)
 
     def _next_idle_interval(self, processed: int) -> float:
         """Exponential backoff on empty polls (cap 30s), reset on activity."""
@@ -126,6 +135,11 @@ class OutboxSender:
 
         if result.success:
             await self._repository.mark_delivered(record.id)
+            metrics.DELIVERIES_TOTAL.labels(
+                channel=record.channel,
+                trigger=record.trigger_event,
+                outcome="delivered",
+            ).inc()
             logger.info("Outbox record delivered", id=record.id, channel=record.channel)
             await self._result_publisher.publish_delivered(record, result.message_id)
             return
@@ -137,12 +151,18 @@ class OutboxSender:
         await self._schedule_retry(record, result.error)
 
     async def _fail_permanently(self, record: OutboxRecord, error: str) -> None:
+        metrics.DELIVERIES_TOTAL.labels(channel=record.channel, trigger=record.trigger_event, outcome="failed").inc()
         logger.error("Outbox record failed permanently", id=record.id, channel=record.channel, error=error)
         await self._repository.mark_failed(record.id, error=error)
 
     async def _schedule_retry(self, record: OutboxRecord, error: str | None) -> None:
         next_retry = record.retry_count + 1
         if next_retry > record.max_retries:
+            metrics.DELIVERIES_TOTAL.labels(
+                channel=record.channel,
+                trigger=record.trigger_event,
+                outcome="failed",
+            ).inc()
             await self._repository.mark_failed(record.id, error=f"retries exhausted: {error}")
             logger.error(
                 "Outbox record failed after max retries",
@@ -151,6 +171,7 @@ class OutboxSender:
                 error=error,
             )
             return
+        metrics.DELIVERIES_TOTAL.labels(channel=record.channel, trigger=record.trigger_event, outcome="retried").inc()
         delay = _retry_delay_seconds(next_retry)
         await self._repository.mark_retry(
             record_id=record.id,
