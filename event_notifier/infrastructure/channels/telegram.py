@@ -14,9 +14,12 @@ import structlog
 from event_schemas.types import TriggerEvent
 from httpx import AsyncClient, HTTPStatusError
 from jinja2 import Environment, TemplateNotFound
+from opentelemetry import trace
 
 from event_notifier.domain.localization import normalize_locale
 from event_notifier.domain.models.notification import ChannelContact, ChannelType, DeliveryResult
+
+_tracer = trace.get_tracer(__name__)
 
 logger = structlog.get_logger(__name__)
 
@@ -48,32 +51,34 @@ class TelegramChannel:
         trigger_event: TriggerEvent,
         template_data: dict[str, Any],
     ) -> DeliveryResult:
-        text = self._render(trigger_event, template_data)
-        if text is None:
-            return DeliveryResult(
-                channel=ChannelType.TELEGRAM,
-                success=False,
-                retryable=False,
-                error=f"No telegram template for trigger_event={trigger_event.value}",
-            )
+        with _tracer.start_as_current_span("notifier.channel_send") as span:
+            span.set_attribute("channel", "telegram")
+            text = self._render(trigger_event, template_data)
+            if text is None:
+                return DeliveryResult(
+                    channel=ChannelType.TELEGRAM,
+                    success=False,
+                    retryable=False,
+                    error=f"No telegram template for trigger_event={trigger_event.value}",
+                )
 
-        try:
-            response = await self._client.post(
-                f"/bot{self._bot_token}/sendMessage",
-                json={"chat_id": contact.contact_id, "text": text, "parse_mode": "HTML"},
-            )
-            response.raise_for_status()
-        except HTTPStatusError as exc:
-            error = f"Telegram HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-            retryable = _is_retryable_status(exc.response.status_code)
-            logger.warning("Telegram send failed", chat_id=contact.contact_id, error=error, retryable=retryable)
-            return DeliveryResult(channel=ChannelType.TELEGRAM, success=False, error=error, retryable=retryable)
-        except httpx.HTTPError as exc:
-            logger.warning("Telegram send transport error", chat_id=contact.contact_id, error=str(exc))
-            return DeliveryResult(channel=ChannelType.TELEGRAM, success=False, error=str(exc), retryable=True)
+            try:
+                response = await self._client.post(
+                    f"/bot{self._bot_token}/sendMessage",
+                    json={"chat_id": contact.contact_id, "text": text, "parse_mode": "HTML"},
+                )
+                response.raise_for_status()
+            except HTTPStatusError as exc:
+                error = f"Telegram HTTP {exc.response.status_code}: {exc.response.text[:200]}"
+                retryable = _is_retryable_status(exc.response.status_code)
+                logger.warning("Telegram send failed", chat_id=contact.contact_id, error=error, retryable=retryable)
+                return DeliveryResult(channel=ChannelType.TELEGRAM, success=False, error=error, retryable=retryable)
+            except httpx.HTTPError as exc:
+                logger.warning("Telegram send transport error", chat_id=contact.contact_id, error=str(exc))
+                return DeliveryResult(channel=ChannelType.TELEGRAM, success=False, error=str(exc), retryable=True)
 
-        body = response.json()
-        message_id = str(body.get("result", {}).get("message_id", ""))
+            body = response.json()
+            message_id = str(body.get("result", {}).get("message_id", ""))
         logger.info("Telegram message sent", chat_id=contact.contact_id, message_id=message_id)
         return DeliveryResult(channel=ChannelType.TELEGRAM, success=True, message_id=message_id)
 

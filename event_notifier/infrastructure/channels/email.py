@@ -15,9 +15,12 @@ import httpx
 import structlog
 from event_schemas.types import TriggerEvent
 from httpx import AsyncClient, HTTPStatusError
+from opentelemetry import trace
 
 from event_notifier.domain.localization import normalize_locale
 from event_notifier.domain.models.notification import ChannelContact, ChannelType, DeliveryResult
+
+_tracer = trace.get_tracer(__name__)
 
 logger = structlog.get_logger(__name__)
 
@@ -62,39 +65,41 @@ class EmailChannel:
         trigger_event: TriggerEvent,
         template_data: dict[str, Any],
     ) -> DeliveryResult:
-        template_id = self._template_id(trigger_event, template_data)
-        if not template_id:
-            return DeliveryResult(
-                channel=ChannelType.EMAIL,
-                success=False,
-                retryable=False,
-                error=f"No UniSender template configured for trigger_event={trigger_event.value}",
-            )
+        with _tracer.start_as_current_span("notifier.channel_send") as span:
+            span.set_attribute("channel", "email")
+            template_id = self._template_id(trigger_event, template_data)
+            if not template_id:
+                return DeliveryResult(
+                    channel=ChannelType.EMAIL,
+                    success=False,
+                    retryable=False,
+                    error=f"No UniSender template configured for trigger_event={trigger_event.value}",
+                )
 
-        payload = {
-            "message": {
-                "template_id": template_id,
-                "recipients": [{"email": contact.contact_id}],
-                "from_email": self._from_email,
-                "from_name": self._from_name,
-                "global_substitutions": flatten_substitutions(template_data),
-            },
-        }
+            payload = {
+                "message": {
+                    "template_id": template_id,
+                    "recipients": [{"email": contact.contact_id}],
+                    "from_email": self._from_email,
+                    "from_name": self._from_name,
+                    "global_substitutions": flatten_substitutions(template_data),
+                },
+            }
 
-        try:
-            response = await self._client.post(UNISENDER_SEND_PATH, json=payload)
-            response.raise_for_status()
-        except HTTPStatusError as exc:
-            error = f"UniSender HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-            retryable = _is_retryable_status(exc.response.status_code)
-            logger.warning("Email send failed", to=contact.contact_id, error=error, retryable=retryable)
-            return DeliveryResult(channel=ChannelType.EMAIL, success=False, error=error, retryable=retryable)
-        except httpx.HTTPError as exc:
-            logger.warning("Email send transport error", to=contact.contact_id, error=str(exc))
-            return DeliveryResult(channel=ChannelType.EMAIL, success=False, error=str(exc), retryable=True)
+            try:
+                response = await self._client.post(UNISENDER_SEND_PATH, json=payload)
+                response.raise_for_status()
+            except HTTPStatusError as exc:
+                error = f"UniSender HTTP {exc.response.status_code}: {exc.response.text[:200]}"
+                retryable = _is_retryable_status(exc.response.status_code)
+                logger.warning("Email send failed", to=contact.contact_id, error=error, retryable=retryable)
+                return DeliveryResult(channel=ChannelType.EMAIL, success=False, error=error, retryable=retryable)
+            except httpx.HTTPError as exc:
+                logger.warning("Email send transport error", to=contact.contact_id, error=str(exc))
+                return DeliveryResult(channel=ChannelType.EMAIL, success=False, error=str(exc), retryable=True)
 
-        body = response.json()
-        job_id = body.get("job_id")
+            body = response.json()
+            job_id = body.get("job_id")
         logger.info("Email sent", to=contact.contact_id, trigger=trigger_event.value, job_id=job_id)
         return DeliveryResult(channel=ChannelType.EMAIL, success=True, message_id=job_id)
 

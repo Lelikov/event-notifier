@@ -17,6 +17,7 @@ import asyncio
 
 import structlog
 from event_schemas.types import TriggerEvent
+from opentelemetry import trace
 
 from event_notifier import metrics
 from event_notifier.domain.models.notification import ChannelContact, ChannelType, OutboxRecord, OutboxStatus
@@ -25,6 +26,8 @@ from event_notifier.interfaces.repository import INotificationRepository
 from event_notifier.interfaces.result_publisher import IDeliveryResultPublisher
 
 logger = structlog.get_logger(__name__)
+
+_tracer = trace.get_tracer(__name__)
 
 _MAX_RETRY_DELAY_SECONDS = 1800
 _MAX_IDLE_POLL_INTERVAL = 30.0
@@ -59,7 +62,9 @@ class OutboxSender:
 
     async def run_once(self) -> int:
         """Process one batch of pending outbox records; returns the batch size."""
-        records = await self._repository.fetch_pending_outbox(self._batch_size)
+        with _tracer.start_as_current_span("notifier.outbox_claim") as span:
+            records = await self._repository.fetch_pending_outbox(self._batch_size)
+            span.set_attribute("outbox.claimed", len(records))
         for record in records:
             await self._process_record(record)
         return len(records)
