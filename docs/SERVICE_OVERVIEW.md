@@ -114,6 +114,10 @@ FCM_SERVICE_ACCOUNT_JSON    # optional
 DEBUG / LOG_LEVEL           # logging
 ```
 
+## Tracing
+
+OpenTelemetry auto-instrumentation (FastAPI, httpx, asyncpg, RabbitMQ via FastStream middleware) + manual spans: `notifier.outbox_claim` (outbox SELECT … FOR UPDATE batch) and `notifier.channel_send` (attribute: `channel` = email/telegram); exported via OTLP/gRPC to the collector → Tempo; gated by `OTEL_SDK_DISABLED` (off by default).
+
 ## Known Limitations
 
 1. **PushChannel not registered** — code and retry classification ready; needs FCM
