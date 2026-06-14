@@ -24,6 +24,7 @@ from event_notifier.infrastructure.channels.telegram import TelegramChannel
 from event_notifier.infrastructure.users_client import UsersClient
 from event_notifier.interfaces.channels import INotificationChannel
 from event_notifier.interfaces.sql import ISqlExecutor
+from event_notifier.telemetry import rabbit_telemetry_middlewares
 
 logger = structlog.get_logger(__name__)
 
@@ -64,7 +65,11 @@ class AppProvider(Provider):
 
     @provide(scope=Scope.APP)
     def provide_broker(self, settings: Settings) -> RabbitBroker:
-        return RabbitBroker(str(settings.rabbit_url), graceful_timeout=settings.graceful_timeout)
+        return RabbitBroker(
+            str(settings.rabbit_url),
+            graceful_timeout=settings.graceful_timeout,
+            middlewares=[*rabbit_telemetry_middlewares()],
+        )
 
     @provide(scope=Scope.APP)
     async def provide_users_client(self, settings: Settings) -> AsyncGenerator[UsersClient]:

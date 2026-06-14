@@ -17,6 +17,7 @@ from event_notifier.config import Settings
 from event_notifier.db.repository import NotificationRepository
 from event_notifier.ioc import AppProvider
 from event_notifier.logger import setup_logger
+from event_notifier.telemetry import instrument_asyncpg, instrument_fastapi, setup_tracing
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -79,6 +80,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
 
 app = FastAPI(title="event-notifier", version="0.4.0", lifespan=lifespan)
+setup_tracing()
+instrument_fastapi(app)
+instrument_asyncpg()
 
 
 async def _collect_health_checks(application: FastAPI) -> dict[str, bool]:
