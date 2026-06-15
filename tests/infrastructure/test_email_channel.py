@@ -8,30 +8,64 @@ import respx
 from event_schemas.types import TriggerEvent
 from httpx import AsyncClient, Response
 
+from event_notifier.adapters.bindings_provider import BindingsProvider
 from event_notifier.domain.models.notification import ChannelContact, ChannelType
 from event_notifier.infrastructure.channels.email import EmailChannel, flatten_substitutions
 
 SEND_URL = "https://go.unisender.ru/ru/transactional/api/v1/email/send.json"
 
-TEMPLATE_IDS_BY_LOCALE = {
-    "ru": {
-        "BOOKING_CREATED": "tmpl-uuid-created",
-        "BOOKING_CANCELLED": "tmpl-uuid-cancelled",
-        "BOOKING_REJECTED_BLACKLISTED": "tmpl-uuid-blacklisted-ru",
-    },
-    "en": {"BOOKING_CREATED": "tmpl-uuid-created-en", "BOOKING_REJECTED_BLACKLISTED": "tmpl-uuid-blacklisted-en"},
-}
+
+class _FakeSql:
+    def __init__(self, rows):
+        self.rows = rows
+
+    async def fetch_all(self, query, values):
+        return self.rows
+
+    async def fetch_one(self, query, values):
+        return None
+
+    async def execute(self, query, values):
+        pass
+
+    def transaction(self):
+        raise NotImplementedError
+
+
+def _bindings(rows) -> BindingsProvider:
+    return BindingsProvider(sql=_FakeSql(rows), ttl_seconds=60)
+
+
+def _email_row(trigger: str, template_id: str | None = "tmpl-uuid-created", enabled: bool = True) -> dict:
+    return {
+        "trigger_event": trigger,
+        "channel": "email",
+        "enabled": enabled,
+        "unisender_template_id": template_id,
+        "telegram_body": None,
+    }
+
+
+_DEFAULT_BINDINGS_ROWS = [
+    _email_row("BOOKING_CREATED", "tmpl-uuid-created"),
+    _email_row("BOOKING_CANCELLED", "tmpl-uuid-cancelled"),
+    _email_row("BOOKING_REJECTED_BLACKLISTED", "tmpl-uuid-blacklisted"),
+    _email_row("BOOKING_RESCHEDULED", "tmpl-uuid-rescheduled"),
+    _email_row("BOOKING_REASSIGNED", "tmpl-uuid-reassigned"),
+    _email_row("BOOKING_REJECTED", "tmpl-uuid-rejected"),
+    # BOOKING_REMINDER intentionally absent (no template configured)
+]
 
 
 @pytest.fixture
 async def email_channel():
+    bindings = _bindings(_DEFAULT_BINDINGS_ROWS)
     async with AsyncClient(base_url="https://go.unisender.ru", headers={"X-API-KEY": "secret-key"}) as client:
         yield EmailChannel(
             http_client=client,
-            template_ids_by_locale=TEMPLATE_IDS_BY_LOCALE,
+            bindings=bindings,
             from_email="noreply@example.com",
             from_name="Test",
-            default_locale="ru",
         )
 
 
@@ -82,7 +116,7 @@ async def test_sends_exact_unisender_payload(email_channel, contact):
 async def test_unconfigured_template_fails_permanently(email_channel, contact):
     result = await email_channel.send(
         contact=contact,
-        trigger_event=TriggerEvent.BOOKING_REMINDER,  # not configured for any locale
+        trigger_event=TriggerEvent.BOOKING_REMINDER,  # not configured in default bindings
         template_data={},
     )
 
@@ -90,70 +124,32 @@ async def test_unconfigured_template_fails_permanently(email_channel, contact):
     assert result.retryable is False
 
 
-async def test_locale_selects_locale_keyed_template_id(email_channel, contact):
-    with respx.mock:
-        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"status": "success", "job_id": "j-1"}))
-
-        result = await email_channel.send(
-            contact=contact,
-            trigger_event=TriggerEvent.BOOKING_CREATED,
-            template_data={"locale": "en"},
+async def test_disabled_binding_fails_permanently(contact):
+    bindings = _bindings([_email_row("BOOKING_CREATED", "tmpl-uuid-created", enabled=False)])
+    async with AsyncClient(base_url="https://go.unisender.ru") as client:
+        channel = EmailChannel(
+            http_client=client, bindings=bindings, from_email="a@b.com", from_name="X"
+        )
+        result = await channel.send(
+            contact=contact, trigger_event=TriggerEvent.BOOKING_CREATED, template_data={}
         )
 
-    assert result.success is True
-    body = json.loads(route.calls[0].request.content)
-    assert body["message"]["template_id"] == "tmpl-uuid-created-en"
+    assert result.success is False
+    assert result.retryable is False
 
 
-async def test_locale_without_own_template_falls_back_to_default_locale(email_channel, contact):
-    with respx.mock:
-        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"status": "success", "job_id": "j-2"}))
-
-        # 'en' has no BOOKING_CANCELLED template — the default 'ru' set is used.
-        result = await email_channel.send(
-            contact=contact,
-            trigger_event=TriggerEvent.BOOKING_CANCELLED,
-            template_data={"locale": "en"},
+async def test_null_template_id_fails_permanently(contact):
+    bindings = _bindings([_email_row("BOOKING_CREATED", None)])
+    async with AsyncClient(base_url="https://go.unisender.ru") as client:
+        channel = EmailChannel(
+            http_client=client, bindings=bindings, from_email="a@b.com", from_name="X"
+        )
+        result = await channel.send(
+            contact=contact, trigger_event=TriggerEvent.BOOKING_CREATED, template_data={}
         )
 
-    assert result.success is True
-    body = json.loads(route.calls[0].request.content)
-    assert body["message"]["template_id"] == "tmpl-uuid-cancelled"
-
-
-@pytest.mark.parametrize(
-    ("locale", "expected_template_id"),
-    [("ru", "tmpl-uuid-blacklisted-ru"), ("en", "tmpl-uuid-blacklisted-en"), (None, "tmpl-uuid-blacklisted-ru")],
-)
-async def test_blacklisted_rejection_template_selected_by_locale(email_channel, contact, locale, expected_template_id):
-    with respx.mock:
-        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"status": "success", "job_id": "j-bl"}))
-
-        template_data = {} if locale is None else {"locale": locale}
-        result = await email_channel.send(
-            contact=contact,
-            trigger_event=TriggerEvent.BOOKING_REJECTED_BLACKLISTED,
-            template_data=template_data,
-        )
-
-    assert result.success is True
-    body = json.loads(route.calls[0].request.content)
-    assert body["message"]["template_id"] == expected_template_id
-
-
-async def test_missing_locale_uses_default_locale_template(email_channel, contact):
-    with respx.mock:
-        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"status": "success", "job_id": "j-3"}))
-
-        result = await email_channel.send(
-            contact=contact,
-            trigger_event=TriggerEvent.BOOKING_CREATED,
-            template_data={},
-        )
-
-    assert result.success is True
-    body = json.loads(route.calls[0].request.content)
-    assert body["message"]["template_id"] == "tmpl-uuid-created"
+    assert result.success is False
+    assert result.retryable is False
 
 
 async def test_4xx_is_permanent(email_channel, contact):

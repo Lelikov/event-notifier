@@ -1,4 +1,4 @@
-"""Tests for TelegramChannel: Jinja2 rendering and error classification."""
+"""Tests for TelegramChannel: binding-based rendering and error classification."""
 
 import json
 from pathlib import Path
@@ -8,8 +8,8 @@ import pytest
 import respx
 from event_schemas.types import TriggerEvent
 from httpx import AsyncClient, Response
-from jinja2 import Environment, FileSystemLoader
 
+from event_notifier.adapters.bindings_provider import BindingsProvider
 from event_notifier.domain.models.notification import ChannelContact, ChannelType
 from event_notifier.infrastructure.channels.telegram import TelegramChannel
 
@@ -18,15 +18,53 @@ SEND_URL = "https://api.telegram.org/bottest-token/sendMessage"
 _TEMPLATES_DIR = Path(__file__).parents[2] / "event_notifier" / "templates"
 
 
-@pytest.fixture
-def template_env():
-    return Environment(loader=FileSystemLoader(_TEMPLATES_DIR), autoescape=True)
+class _FakeSql:
+    def __init__(self, rows):
+        self.rows = rows
+
+    async def fetch_all(self, query, values):
+        return self.rows
+
+    async def fetch_one(self, query, values):
+        return None
+
+    async def execute(self, query, values):
+        pass
+
+    def transaction(self):
+        raise NotImplementedError
+
+
+def _bindings(rows) -> BindingsProvider:
+    return BindingsProvider(sql=_FakeSql(rows), ttl_seconds=60)
+
+
+def _tg_row(trigger: str, body: str | None, enabled: bool = True) -> dict:
+    return {
+        "trigger_event": trigger,
+        "channel": "telegram",
+        "enabled": enabled,
+        "unisender_template_id": None,
+        "telegram_body": body,
+    }
+
+
+def _load_template(locale: str, trigger: str) -> str:
+    return (_TEMPLATES_DIR / locale / "telegram" / f"{trigger}.j2").read_text(encoding="utf-8")
+
+
+def _all_triggers_bindings(locale: str = "ru") -> list[dict]:
+    return [
+        _tg_row(t.value, _load_template(locale, t.value))
+        for t in TriggerEvent
+    ]
 
 
 @pytest.fixture
-async def telegram_channel(template_env):
+async def telegram_channel():
+    bindings = _bindings(_all_triggers_bindings("ru"))
     async with AsyncClient(base_url="https://api.telegram.org") as client:
-        yield TelegramChannel(http_client=client, bot_token="test-token", template_env=template_env)
+        yield TelegramChannel(http_client=client, bot_token="test-token", bindings=bindings)
 
 
 @pytest.fixture
@@ -62,106 +100,21 @@ async def test_renders_booking_details_from_template_data(telegram_channel, cont
 
 
 @pytest.mark.parametrize("trigger", list(TriggerEvent))
-@pytest.mark.parametrize("locale", ["ru", "en"])
-async def test_every_trigger_has_a_template_in_every_locale(telegram_channel, contact, trigger, locale):
+async def test_every_trigger_has_a_ru_template(contact, trigger):
+    bindings = _bindings(_all_triggers_bindings("ru"))
     with respx.mock:
         respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 1}}))
-
-        result = await telegram_channel.send(contact=contact, trigger_event=trigger, template_data={"locale": locale})
-
-    assert result.success is True
-
-
-@pytest.mark.parametrize(
-    ("locale", "expected_fragment"),
-    [("ru", "обратитесь к организатору"), ("en", "contact the organizer")],
-)
-async def test_blacklisted_rejection_template_is_neutral(telegram_channel, contact, locale, expected_fragment):
-    """Dedicated blacklist-rejection template per locale; the wording never mentions the blacklist."""
-    with respx.mock:
-        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 7}}))
-
-        result = await telegram_channel.send(
-            contact=contact,
-            trigger_event=TriggerEvent.BOOKING_REJECTED_BLACKLISTED,
-            template_data={"locale": locale},
-        )
+        async with AsyncClient(base_url="https://api.telegram.org") as client:
+            channel = TelegramChannel(http_client=client, bot_token="test-token", bindings=bindings)
+            result = await channel.send(contact=contact, trigger_event=trigger, template_data={})
 
     assert result.success is True
-    text = json.loads(route.calls[0].request.content)["text"]
-    assert expected_fragment in text
-    lowered = text.lower()
-    assert "blacklist" not in lowered
-    assert "черный список" not in lowered
-    assert "чёрный список" not in lowered
-    assert "BOOKING_REJECTED_BLACKLISTED" not in text
 
 
-async def test_en_locale_selects_english_template(telegram_channel, contact):
-    with respx.mock:
-        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 1}}))
-
-        result = await telegram_channel.send(
-            contact=contact,
-            trigger_event=TriggerEvent.BOOKING_CANCELLED,
-            template_data={"locale": "en", "start_time": "2026-06-12 10:00", "cancellation_reason": "illness"},
-        )
-
-    assert result.success is True
-    body = json.loads(route.calls[0].request.content)
-    assert "Meeting cancelled" in body["text"]
-    assert "illness" in body["text"]
-
-
-async def test_missing_locale_falls_back_to_default_russian(telegram_channel, contact):
-    with respx.mock:
-        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 1}}))
-
-        result = await telegram_channel.send(
-            contact=contact,
-            trigger_event=TriggerEvent.BOOKING_CANCELLED,
-            template_data={"start_time": "2026-06-12 10:00"},
-        )
-
-    assert result.success is True
-    body = json.loads(route.calls[0].request.content)
-    assert "Встреча отменена" in body["text"]
-
-
-async def test_unknown_locale_falls_back_to_default_russian(telegram_channel, contact):
-    with respx.mock:
-        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 1}}))
-
-        result = await telegram_channel.send(
-            contact=contact,
-            trigger_event=TriggerEvent.BOOKING_CANCELLED,
-            template_data={"locale": "fr"},
-        )
-
-    assert result.success is True
-    body = json.loads(route.calls[0].request.content)
-    assert "Встреча отменена" in body["text"]
-
-
-async def test_regional_locale_variant_maps_to_primary_language(telegram_channel, contact):
-    with respx.mock:
-        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 1}}))
-
-        result = await telegram_channel.send(
-            contact=contact,
-            trigger_event=TriggerEvent.BOOKING_CANCELLED,
-            template_data={"locale": "en-GB"},
-        )
-
-    assert result.success is True
-    body = json.loads(route.calls[0].request.content)
-    assert "Meeting cancelled" in body["text"]
-
-
-async def test_unknown_trigger_fails_permanently(template_env, contact):
-    env = Environment(loader=FileSystemLoader("/nonexistent"), autoescape=True)
+async def test_unknown_trigger_fails_permanently(contact):
+    bindings = _bindings([])  # no bindings at all
     async with AsyncClient(base_url="https://api.telegram.org") as client:
-        channel = TelegramChannel(http_client=client, bot_token="test-token", template_env=env)
+        channel = TelegramChannel(http_client=client, bot_token="test-token", bindings=bindings)
         result = await channel.send(contact=contact, trigger_event=TriggerEvent.BOOKING_CREATED, template_data={})
 
     assert result.success is False
@@ -169,18 +122,14 @@ async def test_unknown_trigger_fails_permanently(template_env, contact):
     assert "No telegram template" in result.error
 
 
-async def test_html_in_template_data_is_escaped(telegram_channel, contact):
-    with respx.mock:
-        route = respx.post(SEND_URL).mock(return_value=Response(200, json={"result": {"message_id": 1}}))
+async def test_disabled_binding_fails_permanently(contact):
+    bindings = _bindings([_tg_row("BOOKING_CREATED", "Hello!", enabled=False)])
+    async with AsyncClient(base_url="https://api.telegram.org") as client:
+        channel = TelegramChannel(http_client=client, bot_token="test-token", bindings=bindings)
+        result = await channel.send(contact=contact, trigger_event=TriggerEvent.BOOKING_CREATED, template_data={})
 
-        await telegram_channel.send(
-            contact=contact,
-            trigger_event=TriggerEvent.BOOKING_CANCELLED,
-            template_data={"cancellation_reason": "<script>alert(1)</script>"},
-        )
-
-    body = json.loads(route.calls[0].request.content)
-    assert "<script>" not in body["text"]
+    assert result.success is False
+    assert result.retryable is False
 
 
 @pytest.mark.parametrize("status_code", [408, 429, 500, 503])

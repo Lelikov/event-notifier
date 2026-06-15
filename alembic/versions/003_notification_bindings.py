@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "003"

@@ -80,5 +80,7 @@ class Settings(BaseSettings):
     telegram_base_url: str = "https://api.telegram.org"
     telegram_bot_token: str = Field(strict=True)
 
+    bindings_cache_ttl_seconds: int = 30
+
     fcm_project_id: str | None = None
     fcm_service_account_json: str | None = None

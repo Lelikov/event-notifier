@@ -4,6 +4,7 @@ from typing import Any
 
 import structlog
 
+from event_notifier.adapters.bindings_provider import BindingsProvider
 from event_notifier.domain.localization import localize_template_context
 from event_notifier.domain.models.notification import (
     ChannelContact,
@@ -23,11 +24,11 @@ class ProcessNotificationCommandUseCase:
     Contact resolution policy:
     - Email is always taken from the command recipient itself (the producer's
       contract guarantees it), so an email delivery is never lost to a failed
-      or missing user lookup.
+      or missing user lookup — unless the binding disables email for this trigger.
     - When the receiver resolved a user_id (normalized.participants), the
-      event-users profile only ADDS extra channels (telegram). A 404 there
-      degrades to email-only with a warning; transport/5xx errors propagate
-      so the message is NACKed and retried.
+      event-users profile only ADDS extra channels (telegram) if the binding
+      for this trigger enables it. A 404 there degrades to email-only with a
+      warning; transport/5xx errors propagate so the message is NACKed and retried.
     """
 
     def __init__(
@@ -35,9 +36,11 @@ class ProcessNotificationCommandUseCase:
         *,
         repository: INotificationRepository,
         users_client: IUsersClient,
+        bindings: BindingsProvider,
     ) -> None:
         self._repository = repository
         self._users_client = users_client
+        self._bindings = bindings
 
     async def execute(self, command: NotificationCommand) -> None:
         if await self._repository.is_processed(command.event_id):
@@ -51,7 +54,7 @@ class ProcessNotificationCommandUseCase:
                 recipient.time_zone,
                 locale=recipient.locale,
             )
-            for contact in await self._resolve_contacts(recipient):
+            for contact in await self._resolve_contacts(recipient, command.trigger_event):
                 records.append(self._to_outbox_record(command, contact, template_context))
 
         if not records:
@@ -83,22 +86,35 @@ class ProcessNotificationCommandUseCase:
             records_count=len(records),
         )
 
-    async def _resolve_contacts(self, recipient: CommandRecipient) -> list[ChannelContact]:
-        contacts = [
-            ChannelContact(
-                channel=ChannelType.EMAIL,
-                contact_id=recipient.email,
-                user_id=recipient.user_id or "",
-                email=recipient.email,
-                role=recipient.role,
+    async def _resolve_contacts(
+        self, recipient: CommandRecipient, trigger_event: str
+    ) -> list[ChannelContact]:
+        contacts: list[ChannelContact] = []
+
+        if await self._channel_enabled(trigger_event, ChannelType.EMAIL):
+            contacts.append(
+                ChannelContact(
+                    channel=ChannelType.EMAIL,
+                    contact_id=recipient.email,
+                    user_id=recipient.user_id or "",
+                    email=recipient.email,
+                    role=recipient.role,
+                )
             )
-        ]
+
         if not recipient.user_id:
-            logger.warning(
-                "Recipient has no resolved user_id, email-only delivery",
-                email=recipient.email,
-                role=recipient.role,
-            )
+            if not contacts:
+                logger.warning(
+                    "Recipient has no resolved user_id and email channel disabled, skipping",
+                    email=recipient.email,
+                    role=recipient.role,
+                )
+            elif ChannelType.EMAIL in {c.channel for c in contacts}:
+                logger.warning(
+                    "Recipient has no resolved user_id, email-only delivery",
+                    email=recipient.email,
+                    role=recipient.role,
+                )
             return contacts
 
         user_contacts = await self._users_client.get_user_contacts(user_id=recipient.user_id)
@@ -110,7 +126,7 @@ class ProcessNotificationCommandUseCase:
             )
             return contacts
 
-        if user_contacts.telegram_chat_id:
+        if user_contacts.telegram_chat_id and await self._channel_enabled(trigger_event, ChannelType.TELEGRAM):
             contacts.append(
                 ChannelContact(
                     channel=ChannelType.TELEGRAM,
@@ -121,6 +137,10 @@ class ProcessNotificationCommandUseCase:
                 )
             )
         return contacts
+
+    async def _channel_enabled(self, trigger_event: str, channel: ChannelType) -> bool:
+        binding = await self._bindings.get(trigger_event, channel)
+        return binding is not None and binding.enabled
 
     @staticmethod
     def _to_outbox_record(

@@ -3,10 +3,7 @@
 External contract (hard invariant): POST /ru/transactional/api/v1/email/send.json
 with the API key in the X-API-KEY header (never in the body, never logged) and
 ``message.template_id`` set to a real template UUID provisioned in UniSender Go
-and supplied via UNISENDER_TEMPLATE_IDS config.
-
-Template ids are locale-keyed ({locale: {TRIGGER_EVENT: id}}); the recipient's
-``template_data["locale"]`` selects the set, falling back to the default locale.
+and supplied via the notification_bindings table (admin-managed).
 """
 
 from typing import Any
@@ -17,7 +14,7 @@ from event_schemas.types import TriggerEvent
 from httpx import AsyncClient, HTTPStatusError
 from opentelemetry import trace
 
-from event_notifier.domain.localization import normalize_locale
+from event_notifier.adapters.bindings_provider import BindingsProvider
 from event_notifier.domain.models.notification import ChannelContact, ChannelType, DeliveryResult
 
 _tracer = trace.get_tracer(__name__)
@@ -47,16 +44,14 @@ class EmailChannel:
         self,
         *,
         http_client: AsyncClient,
-        template_ids_by_locale: dict[str, dict[str, str]],
+        bindings: BindingsProvider,
         from_email: str,
         from_name: str,
-        default_locale: str = "ru",
     ) -> None:
         self._client = http_client
-        self._template_ids_by_locale = template_ids_by_locale
+        self._bindings = bindings
         self._from_email = from_email
         self._from_name = from_name
-        self._default_locale = default_locale
 
     async def send(
         self,
@@ -67,7 +62,7 @@ class EmailChannel:
     ) -> DeliveryResult:
         with _tracer.start_as_current_span("notifier.channel_send") as span:
             span.set_attribute("channel", "email")
-            template_id = self._template_id(trigger_event, template_data)
+            template_id = await self._template_id(trigger_event)
             if not template_id:
                 return DeliveryResult(
                     channel=ChannelType.EMAIL,
@@ -103,11 +98,8 @@ class EmailChannel:
         logger.info("Email sent", to=contact.contact_id, trigger=trigger_event.value, job_id=job_id)
         return DeliveryResult(channel=ChannelType.EMAIL, success=True, message_id=job_id)
 
-    def _template_id(self, trigger_event: TriggerEvent, template_data: dict[str, Any]) -> str | None:
-        """Pick the template id for the recipient's locale, falling back to the default locale's set."""
-        locale = normalize_locale(template_data.get("locale")) or self._default_locale
-        for candidate in dict.fromkeys((locale, self._default_locale)):
-            template_id = self._template_ids_by_locale.get(candidate, {}).get(trigger_event.value)
-            if template_id:
-                return template_id
-        return None
+    async def _template_id(self, trigger_event: TriggerEvent) -> str | None:
+        binding = await self._bindings.get(trigger_event.value, ChannelType.EMAIL)
+        if binding is None or not binding.enabled:
+            return None
+        return binding.unisender_template_id

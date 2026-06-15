@@ -4,9 +4,47 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from event_notifier.adapters.bindings_provider import BindingsProvider
 from event_notifier.application.use_cases.process_notification_command import ProcessNotificationCommandUseCase
 from event_notifier.domain.models.notification import CommandRecipient, NotificationCommand, UserContacts
 from event_notifier.interfaces.users_client import UsersServiceError
+
+
+class _FakeSql:
+    """Fake SQL executor that returns configurable rows for fetch_all."""
+
+    def __init__(self, rows=None):
+        self._rows = rows or []
+
+    async def fetch_all(self, query, values):
+        return self._rows
+
+    async def fetch_one(self, query, values):
+        return None
+
+    async def execute(self, query, values):
+        pass
+
+    def transaction(self):
+        raise NotImplementedError
+
+
+def _all_enabled_bindings() -> BindingsProvider:
+    """Returns a BindingsProvider that reports all channels as enabled for all triggers."""
+    rows = []
+    for trigger in [
+        "BOOKING_CREATED", "BOOKING_RESCHEDULED", "BOOKING_REASSIGNED",
+        "BOOKING_CANCELLED", "BOOKING_REMINDER", "BOOKING_REJECTED", "BOOKING_REJECTED_BLACKLISTED",
+    ]:
+        rows.append({
+            "trigger_event": trigger, "channel": "email", "enabled": True,
+            "unisender_template_id": "tmpl-id", "telegram_body": None,
+        })
+        rows.append({
+            "trigger_event": trigger, "channel": "telegram", "enabled": True,
+            "unisender_template_id": None, "telegram_body": "Hi!",
+        })
+    return BindingsProvider(sql=_FakeSql(rows), ttl_seconds=60)
 
 
 @pytest.fixture
@@ -44,8 +82,12 @@ def make_command(
     )
 
 
-def make_use_case(repo, users) -> ProcessNotificationCommandUseCase:
-    return ProcessNotificationCommandUseCase(repository=repo, users_client=users)
+def make_use_case(repo, users, bindings=None) -> ProcessNotificationCommandUseCase:
+    return ProcessNotificationCommandUseCase(
+        repository=repo,
+        users_client=users,
+        bindings=bindings or _all_enabled_bindings(),
+    )
 
 
 async def test_writes_email_and_telegram_records(mock_repository, mock_users_client):
@@ -179,3 +221,41 @@ async def test_blacklisted_rejection_trigger_reaches_the_outbox(mock_repository,
     assert [r["channel"] for r in records] == ["email"]
     assert all(r["trigger_event"] == "BOOKING_REJECTED_BLACKLISTED" for r in records)
     assert records[0]["idempotency_key"] == "evt-001:cli@example.com:email"
+
+
+async def test_email_disabled_binding_skips_email_channel(mock_repository, mock_users_client):
+    """When the binding disables email for a trigger, no email contacts are resolved."""
+    rows = [
+        {"trigger_event": "BOOKING_CREATED", "channel": "email", "enabled": False,
+         "unisender_template_id": None, "telegram_body": None},
+        {"trigger_event": "BOOKING_CREATED", "channel": "telegram", "enabled": False,
+         "unisender_template_id": None, "telegram_body": None},
+    ]
+    bindings = BindingsProvider(sql=_FakeSql(rows), ttl_seconds=60)
+    command = make_command(
+        recipients=(CommandRecipient(email="cli@example.com", role="client", user_id=None),),
+    )
+
+    await make_use_case(mock_repository, mock_users_client, bindings=bindings).execute(command)
+
+    # No contacts → write_outbox_atomically is called with empty records
+    mock_repository.write_outbox_atomically.assert_awaited_once_with(cloud_event_id="evt-001", records=[])
+
+
+async def test_telegram_disabled_binding_skips_telegram_channel(mock_repository, mock_users_client):
+    """When the telegram binding is disabled, only email contact is resolved."""
+    rows = [
+        {"trigger_event": "BOOKING_CREATED", "channel": "email", "enabled": True,
+         "unisender_template_id": "tmpl-id", "telegram_body": None},
+        {"trigger_event": "BOOKING_CREATED", "channel": "telegram", "enabled": False,
+         "unisender_template_id": None, "telegram_body": None},
+    ]
+    bindings = BindingsProvider(sql=_FakeSql(rows), ttl_seconds=60)
+    command = make_command(
+        recipients=(CommandRecipient(email="cli@example.com", role="client", user_id="u-1"),),
+    )
+
+    await make_use_case(mock_repository, mock_users_client, bindings=bindings).execute(command)
+
+    records = mock_repository.write_outbox_atomically.call_args.kwargs["records"]
+    assert [r["channel"] for r in records] == ["email"]
