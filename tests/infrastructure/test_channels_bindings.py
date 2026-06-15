@@ -1,4 +1,4 @@
-"""Tests for channel behavior driven by NotificationBinding entries."""
+"""Tests for channel behavior driven by NotificationBinding entries (role-aware)."""
 
 import pytest
 from event_schemas.types import TriggerEvent
@@ -24,20 +24,34 @@ class _Sql:
         raise NotImplementedError
 
 
-@pytest.mark.anyio
-async def test_telegram_renders_binding_body():
-    rows = [{"trigger_event": "BOOKING_CREATED", "channel": "telegram", "enabled": True,
-             "unisender_template_id": None, "telegram_body": "Привет, {{ client_name }}!"}]
-    bindings = BindingsProvider(sql=_Sql(rows), ttl_seconds=60)
-    chan = TelegramChannel(http_client=None, bot_token="t", bindings=bindings)
-    text = await chan._render(TriggerEvent.BOOKING_CREATED, {"client_name": "Анна"})
-    assert text == "Привет, Анна!"
+def _row(role, body, enabled=True):
+    return {
+        "trigger_event": "BOOKING_CREATED",
+        "recipient_role": role,
+        "channel": "telegram",
+        "enabled": enabled,
+        "unisender_template_id": None,
+        "telegram_body": body,
+    }
 
 
 @pytest.mark.anyio
-async def test_telegram_skips_when_disabled():
-    rows = [{"trigger_event": "BOOKING_CREATED", "channel": "telegram", "enabled": False,
-             "unisender_template_id": None, "telegram_body": "x"}]
+async def test_telegram_renders_role_specific_body():
+    rows = [
+        _row("client", "Клиент {{ client_name }}"),
+        _row("organizer", "Волонтёр {{ client_name }}"),
+    ]
     bindings = BindingsProvider(sql=_Sql(rows), ttl_seconds=60)
     chan = TelegramChannel(http_client=None, bot_token="t", bindings=bindings)
-    assert await chan._render(TriggerEvent.BOOKING_CREATED, {}) is None
+    client_text = await chan._render(TriggerEvent.BOOKING_CREATED, "client", {"client_name": "Анна"})
+    organizer_text = await chan._render(TriggerEvent.BOOKING_CREATED, "organizer", {"client_name": "Анна"})
+    assert client_text == "Клиент Анна"
+    assert organizer_text == "Волонтёр Анна"
+
+
+@pytest.mark.anyio
+async def test_telegram_skips_when_role_binding_disabled():
+    rows = [_row("client", "x", enabled=False)]
+    bindings = BindingsProvider(sql=_Sql(rows), ttl_seconds=60)
+    chan = TelegramChannel(http_client=None, bot_token="t", bindings=bindings)
+    assert await chan._render(TriggerEvent.BOOKING_CREATED, "client", {}) is None

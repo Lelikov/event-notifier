@@ -42,6 +42,7 @@ def _bindings(rows) -> BindingsProvider:
 def _tg_row(trigger: str, body: str | None, enabled: bool = True) -> dict:
     return {
         "trigger_event": trigger,
+        "recipient_role": "client",
         "channel": "telegram",
         "enabled": enabled,
         "unisender_template_id": None,

@@ -39,6 +39,7 @@ def _bindings(rows) -> BindingsProvider:
 def _email_row(trigger: str, template_id: str | None = "tmpl-uuid-created", enabled: bool = True) -> dict:
     return {
         "trigger_event": trigger,
+        "recipient_role": "client",
         "channel": "email",
         "enabled": enabled,
         "unisender_template_id": template_id,

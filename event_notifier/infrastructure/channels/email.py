@@ -62,7 +62,7 @@ class EmailChannel:
     ) -> DeliveryResult:
         with _tracer.start_as_current_span("notifier.channel_send") as span:
             span.set_attribute("channel", "email")
-            template_id = await self._template_id(trigger_event)
+            template_id = await self._template_id(trigger_event, contact.role)
             if not template_id:
                 return DeliveryResult(
                     channel=ChannelType.EMAIL,
@@ -98,8 +98,8 @@ class EmailChannel:
         logger.info("Email sent", to=contact.contact_id, trigger=trigger_event.value, job_id=job_id)
         return DeliveryResult(channel=ChannelType.EMAIL, success=True, message_id=job_id)
 
-    async def _template_id(self, trigger_event: TriggerEvent) -> str | None:
-        binding = await self._bindings.get(trigger_event.value, ChannelType.EMAIL)
+    async def _template_id(self, trigger_event: TriggerEvent, recipient_role: str) -> str | None:
+        binding = await self._bindings.get(trigger_event.value, recipient_role, ChannelType.EMAIL)
         if binding is None or not binding.enabled:
             return None
         return binding.unisender_template_id

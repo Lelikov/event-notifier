@@ -50,7 +50,7 @@ class TelegramChannel:
     ) -> DeliveryResult:
         with _tracer.start_as_current_span("notifier.channel_send") as span:
             span.set_attribute("channel", "telegram")
-            text = await self._render(trigger_event, template_data)
+            text = await self._render(trigger_event, contact.role, template_data)
             if text is None:
                 return DeliveryResult(
                     channel=ChannelType.TELEGRAM,
@@ -79,8 +79,10 @@ class TelegramChannel:
         logger.info("Telegram message sent", chat_id=contact.contact_id, message_id=message_id)
         return DeliveryResult(channel=ChannelType.TELEGRAM, success=True, message_id=message_id)
 
-    async def _render(self, trigger_event: TriggerEvent, template_data: dict[str, Any]) -> str | None:
-        binding = await self._bindings.get(trigger_event.value, ChannelType.TELEGRAM)
+    async def _render(
+        self, trigger_event: TriggerEvent, recipient_role: str, template_data: dict[str, Any]
+    ) -> str | None:
+        binding = await self._bindings.get(trigger_event.value, recipient_role, ChannelType.TELEGRAM)
         if binding is None or not binding.enabled or not binding.telegram_body:
             return None
         return self._jinja.from_string(binding.telegram_body).render(**template_data).strip()
