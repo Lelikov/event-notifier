@@ -192,8 +192,8 @@ class NotificationRepository:
 
     async def list_bindings(self) -> list[dict]:
         rows = await self._sql.fetch_all(
-            "SELECT trigger_event, channel, enabled, unisender_template_id, telegram_body, updated_at "
-            "FROM notification_bindings ORDER BY trigger_event, channel",
+            "SELECT trigger_event, recipient_role, channel, enabled, unisender_template_id, telegram_body, "
+            "updated_at FROM notification_bindings ORDER BY trigger_event, recipient_role, channel",
             {},
         )
         return [dict(r) for r in rows]
@@ -202,6 +202,7 @@ class NotificationRepository:
         self,
         *,
         trigger_event: str,
+        recipient_role: str,
         channel: str,
         enabled: bool,
         unisender_template_id: str | None,
@@ -209,12 +210,19 @@ class NotificationRepository:
     ) -> None:
         await self._sql.execute(
             "INSERT INTO notification_bindings "
-            "(trigger_event, channel, enabled, unisender_template_id, telegram_body, updated_at) "
-            "VALUES (:t, :c, :en, :uid, :tb, now()) "
-            "ON CONFLICT (trigger_event, channel) DO UPDATE SET "
+            "(trigger_event, recipient_role, channel, enabled, unisender_template_id, telegram_body, updated_at) "
+            "VALUES (:t, :rr, :c, :en, :uid, :tb, now()) "
+            "ON CONFLICT (trigger_event, recipient_role, channel) DO UPDATE SET "
             "enabled = excluded.enabled, unisender_template_id = excluded.unisender_template_id, "
             "telegram_body = excluded.telegram_body, updated_at = now()",
-            {"t": trigger_event, "c": channel, "en": enabled, "uid": unisender_template_id, "tb": telegram_body},
+            {
+                "t": trigger_event,
+                "rr": recipient_role,
+                "c": channel,
+                "en": enabled,
+                "uid": unisender_template_id,
+                "tb": telegram_body,
+            },
         )
 
     async def healthcheck(self) -> bool:
