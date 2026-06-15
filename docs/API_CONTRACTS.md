@@ -110,11 +110,18 @@ logged and never retried (the notification itself is already delivered).
 
 ## External Provider Contracts (hard invariants)
 
+### `notification_bindings` table
+
+PK `(trigger_event, recipient_role, channel)`. `recipient_role` is `client` or `organizer`.
+Each trigger×channel combination has two rows — one per role — so channels can carry
+different templates/bodies for the client vs. the organizer. Migration `004` adds the column,
+clones every `003`-seeded row for `organizer`, and re-keys the PK.
+
 ### UniSender Go
 - `POST https://go.unisender.ru/ru/transactional/api/v1/email/send.json`
 - API key in `X-API-KEY` header (never in body, never logged)
 - `message.template_id` = template UUID read from `notification_bindings.unisender_template_id`
-  at runtime (via `BindingsProvider`; v1 is single-locale — the `DEFAULT_LOCALE` seed)
+  for `(trigger_event, contact.role, channel)` at runtime (via `BindingsProvider`; v1 is single-locale — the `DEFAULT_LOCALE` seed)
 - `message.global_substitutions` = flat scalar key/values only (nested structures dropped)
 
 The admin API also calls:
@@ -125,8 +132,9 @@ The admin API also calls:
 ### Telegram Bot API
 - `POST https://api.telegram.org/bot{token}/sendMessage`
 - `{"chat_id", "text", "parse_mode": "HTML"}`; text is the `telegram_body` field from
-  `notification_bindings`, rendered at delivery time with Jinja2 `SandboxedEnvironment`
-  (from-string; `autoescape=False`; sandbox blocks unsafe attribute access)
+  `notification_bindings` for `(trigger_event, contact.role, channel)`, rendered at delivery
+  time with Jinja2 `SandboxedEnvironment` (from-string; `autoescape=False`; sandbox blocks
+  unsafe attribute access)
 
 ### Trigger-specific notes
 - `BOOKING_REJECTED_BLACKLISTED` (booking rejected because the client matched the
@@ -152,8 +160,8 @@ Auth: `Authorization: Bearer <NOTIFIER_ADMIN_TOKEN>` — static service token, c
 
 | Method | Path | Request body | Response |
 |--------|------|-------------|----------|
-| GET | `/api/notifications/config` | — | `{"bindings": [{trigger_event, channel, enabled, unisender_template_id, telegram_body, updated_at}, ...]}` — all 14 rows |
-| PUT | `/api/notifications/config/{trigger_event}/{channel}` | `{"enabled": bool, "unisender_template_id": str\|null, "telegram_body": str\|null}` | `{"status": "ok"}` — upserts the row, validates Jinja2 for telegram channel, invalidates `BindingsProvider` cache; 400 on invalid Jinja2 or unknown channel |
+| GET | `/api/notifications/config` | — | `{"bindings": [{trigger_event, recipient_role, channel, enabled, unisender_template_id, telegram_body, updated_at}, ...]}` — all rows (two per trigger×channel: one for `client`, one for `organizer`) |
+| PUT | `/api/notifications/config/{trigger_event}/{recipient_role}/{channel}` | `{"enabled": bool, "unisender_template_id": str\|null, "telegram_body": str\|null}` | `{"status": "ok"}` — upserts the row for the given `recipient_role`; validates `recipient_role ∈ {client, organizer}` (400 `{"detail": "unknown role"}` otherwise); validates Jinja2 for telegram channel; invalidates `BindingsProvider` cache; 400 on invalid Jinja2 or unknown channel |
 | GET | `/api/notifications/unisender-templates` | — | `{"templates": [{"id": "...", "name": "..."}]}` — cached list; `?refresh=true` forces a live fetch |
 | POST | `/api/notifications/telegram/preview` | `{"telegram_body": "...", "sample_data": {...}\|null}` | `{"rendered": "..."}` — renders the template with sample data (defaults provided if `sample_data` is null); 400 on render error |
 

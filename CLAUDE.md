@@ -66,7 +66,7 @@ OutboxSender (adapters/outbox_sender.py)
 | Repository | `db/repository.py` | raw `text()` SQL: atomic claim+write, SKIP LOCKED batch claim, reaper, retry/fail marks, `list_bindings()`, `upsert_binding()` |
 | SQL executor | `adapters/sql.py` | fresh `AsyncSession` per operation; `transaction()` for atomic units |
 | Domain | `domain/models/notification.py`, `domain/models/binding.py`, `domain/localization.py` | frozen DTOs; `NotificationBinding` DTO; pure per-recipient time localization |
-| Bindings provider | `adapters/bindings_provider.py` | `BindingsProvider(sql, ttl_seconds)` — in-memory TTL cache of `notification_bindings`; `get(trigger_event, channel)` / `invalidate()` |
+| Bindings provider | `adapters/bindings_provider.py` | `BindingsProvider(sql, ttl_seconds)` — in-memory TTL cache of `notification_bindings`; `get(trigger_event, recipient_role, channel)` / `invalidate()`; cache keyed on `(trigger_event, recipient_role, channel)` |
 | Use case | `application/use_cases/process_notification_command.py` | contact resolution → outbox write; skips channels whose binding is disabled |
 | Consumer | `adapters/consumer.py` | FastStream subscriber (raw message via Context), ack policy, DLX topology |
 | Outbox sender | `adapters/outbox_sender.py` | polling, permanent/transient classification, result publishing |
@@ -92,22 +92,26 @@ OutboxSender (adapters/outbox_sender.py)
 
 ### Notification Bindings + Admin API
 
-`notification_bindings` (PK `(trigger_event, channel)`) stores admin-managed channel
-enablement and template config. Seeded by migration `003_notification_bindings` from
-`UNISENDER_TEMPLATE_IDS` env and repo `.j2` files (default locale); the DB is authoritative
-at runtime.
+`notification_bindings` (PK `(trigger_event, recipient_role, channel)`) stores
+admin-managed channel enablement and template config per recipient role (`client` or
+`organizer`). Seeded by migration `003_notification_bindings` from `UNISENDER_TEMPLATE_IDS`
+env and repo `.j2` files (default locale); migration `004` adds the `recipient_role` column,
+clones every `003`-seeded row for the organizer role (so both roles start with identical
+values), and re-keys the PK. The DB is authoritative at runtime.
 
 `BindingsProvider` caches the table in memory with a TTL (`BINDINGS_CACHE_TTL_SECONDS`,
-default 30 s). A channel fires only when its binding is `enabled = true` AND the recipient
-has a contact for it. `EmailChannel` reads `unisender_template_id`; `TelegramChannel`
-renders `telegram_body` with Jinja2 `SandboxedEnvironment` (from-string).
+default 30 s); the cache key is `(trigger_event, recipient_role, channel)`. A channel fires
+only when its binding is `enabled = true` AND the recipient has a contact for it. Channels
+select the template/body by the recipient's role (`contact.role`) at send time: `EmailChannel`
+reads `unisender_template_id`; `TelegramChannel` renders `telegram_body` with Jinja2
+`SandboxedEnvironment` (from-string).
 
 Admin API — prefix `/api/notifications`, auth `Authorization: Bearer <NOTIFIER_ADMIN_TOKEN>`:
 
 | Endpoint | Action |
 |----------|--------|
-| `GET /config` | list all bindings |
-| `PUT /config/{trigger_event}/{channel}` | upsert binding, validate Jinja2, invalidate cache |
+| `GET /config` | list all bindings (each row includes `recipient_role`) |
+| `PUT /config/{trigger_event}/{recipient_role}/{channel}` | upsert binding for the given role; validates `recipient_role ∈ {client, organizer}` (400 `unknown role` otherwise); validates Jinja2 for telegram; invalidates cache |
 | `GET /unisender-templates[?refresh=]` | cached UniSender template list |
 | `POST /telegram/preview` | render a telegram body with sample data |
 
