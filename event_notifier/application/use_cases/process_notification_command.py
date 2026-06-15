@@ -91,7 +91,7 @@ class ProcessNotificationCommandUseCase:
     ) -> list[ChannelContact]:
         contacts: list[ChannelContact] = []
 
-        if await self._channel_enabled(trigger_event, ChannelType.EMAIL):
+        if await self._channel_enabled(trigger_event, recipient.role, ChannelType.EMAIL):
             contacts.append(
                 ChannelContact(
                     channel=ChannelType.EMAIL,
@@ -126,7 +126,9 @@ class ProcessNotificationCommandUseCase:
             )
             return contacts
 
-        if user_contacts.telegram_chat_id and await self._channel_enabled(trigger_event, ChannelType.TELEGRAM):
+        if user_contacts.telegram_chat_id and await self._channel_enabled(
+            trigger_event, recipient.role, ChannelType.TELEGRAM
+        ):
             contacts.append(
                 ChannelContact(
                     channel=ChannelType.TELEGRAM,
@@ -138,8 +140,10 @@ class ProcessNotificationCommandUseCase:
             )
         return contacts
 
-    async def _channel_enabled(self, trigger_event: str, channel: ChannelType) -> bool:
-        binding = await self._bindings.get(trigger_event, channel)
+    async def _channel_enabled(
+        self, trigger_event: str, recipient_role: str, channel: ChannelType
+    ) -> bool:
+        binding = await self._bindings.get(trigger_event, recipient_role, channel)
         return binding is not None and binding.enabled
 
     @staticmethod

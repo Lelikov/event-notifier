@@ -30,20 +30,21 @@ class _FakeSql:
 
 
 def _all_enabled_bindings() -> BindingsProvider:
-    """Returns a BindingsProvider that reports all channels as enabled for all triggers."""
+    """Returns a BindingsProvider that reports all channels as enabled for all triggers and roles."""
     rows = []
     for trigger in [
         "BOOKING_CREATED", "BOOKING_RESCHEDULED", "BOOKING_REASSIGNED",
         "BOOKING_CANCELLED", "BOOKING_REMINDER", "BOOKING_REJECTED", "BOOKING_REJECTED_BLACKLISTED",
     ]:
-        rows.append({
-            "trigger_event": trigger, "channel": "email", "enabled": True,
-            "unisender_template_id": "tmpl-id", "telegram_body": None,
-        })
-        rows.append({
-            "trigger_event": trigger, "channel": "telegram", "enabled": True,
-            "unisender_template_id": None, "telegram_body": "Hi!",
-        })
+        for role in ["organizer", "client"]:
+            rows.append({
+                "trigger_event": trigger, "recipient_role": role, "channel": "email", "enabled": True,
+                "unisender_template_id": "tmpl-id", "telegram_body": None,
+            })
+            rows.append({
+                "trigger_event": trigger, "recipient_role": role, "channel": "telegram", "enabled": True,
+                "unisender_template_id": None, "telegram_body": "Hi!",
+            })
     return BindingsProvider(sql=_FakeSql(rows), ttl_seconds=60)
 
 
@@ -226,9 +227,9 @@ async def test_blacklisted_rejection_trigger_reaches_the_outbox(mock_repository,
 async def test_email_disabled_binding_skips_email_channel(mock_repository, mock_users_client):
     """When the binding disables email for a trigger, no email contacts are resolved."""
     rows = [
-        {"trigger_event": "BOOKING_CREATED", "channel": "email", "enabled": False,
+        {"trigger_event": "BOOKING_CREATED", "recipient_role": "client", "channel": "email", "enabled": False,
          "unisender_template_id": None, "telegram_body": None},
-        {"trigger_event": "BOOKING_CREATED", "channel": "telegram", "enabled": False,
+        {"trigger_event": "BOOKING_CREATED", "recipient_role": "client", "channel": "telegram", "enabled": False,
          "unisender_template_id": None, "telegram_body": None},
     ]
     bindings = BindingsProvider(sql=_FakeSql(rows), ttl_seconds=60)
@@ -245,9 +246,9 @@ async def test_email_disabled_binding_skips_email_channel(mock_repository, mock_
 async def test_telegram_disabled_binding_skips_telegram_channel(mock_repository, mock_users_client):
     """When the telegram binding is disabled, only email contact is resolved."""
     rows = [
-        {"trigger_event": "BOOKING_CREATED", "channel": "email", "enabled": True,
+        {"trigger_event": "BOOKING_CREATED", "recipient_role": "client", "channel": "email", "enabled": True,
          "unisender_template_id": "tmpl-id", "telegram_body": None},
-        {"trigger_event": "BOOKING_CREATED", "channel": "telegram", "enabled": False,
+        {"trigger_event": "BOOKING_CREATED", "recipient_role": "client", "channel": "telegram", "enabled": False,
          "unisender_template_id": None, "telegram_body": None},
     ]
     bindings = BindingsProvider(sql=_FakeSql(rows), ttl_seconds=60)
@@ -259,3 +260,43 @@ async def test_telegram_disabled_binding_skips_telegram_channel(mock_repository,
 
     records = mock_repository.write_outbox_atomically.call_args.kwargs["records"]
     assert [r["channel"] for r in records] == ["email"]
+
+
+@pytest.mark.anyio
+async def test_email_enabled_per_role():
+    """A binding disabled for organizer must not disable email for client."""
+    from event_notifier.application.use_cases.process_notification_command import (
+        ProcessNotificationCommandUseCase,
+    )
+    from event_notifier.domain.models.notification import ChannelType
+
+    calls: list[tuple[str, str, ChannelType]] = []
+
+    class _Bindings:
+        async def get(self, trigger_event, recipient_role, channel):
+            calls.append((trigger_event, recipient_role, channel))
+
+            class _B:
+                enabled = recipient_role == "client"
+
+            return _B()
+
+    class _Repo:
+        async def is_processed(self, event_id):
+            return False
+
+        async def write_outbox_atomically(self, *, cloud_event_id, records):
+            return True
+
+    class _Users:
+        async def get_user_contacts(self, *, user_id):
+            return None
+
+    use_case = ProcessNotificationCommandUseCase(
+        repository=_Repo(), users_client=_Users(), bindings=_Bindings()
+    )
+    enabled_client = await use_case._channel_enabled("BOOKING_CREATED", "client", ChannelType.EMAIL)
+    enabled_org = await use_case._channel_enabled("BOOKING_CREATED", "organizer", ChannelType.EMAIL)
+    assert enabled_client is True
+    assert enabled_org is False
+    assert ("BOOKING_CREATED", "client", ChannelType.EMAIL) in calls
