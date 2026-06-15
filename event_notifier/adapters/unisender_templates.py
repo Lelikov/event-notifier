@@ -9,7 +9,10 @@ class UnisenderTemplateList:
     """Fetches the template list from UniSender Go and caches it in memory.
 
     UniSender Go: POST /ru/transactional/api/v1/template/list.json
-    Response shape: {"templates": [{"id": <int>, "title": "<str>"}, ...]}
+    Real response shape: {"status": "success", "templates":
+        [{"id": "<uuid-str>", "name": "<str>", "subject": "<str>", ...}, ...]}.
+    The mock stub historically used {"id": <int>, "title": ...}; the `title or
+    name` fallback below covers both, and `id` is always stringified.
     """
 
     def __init__(
