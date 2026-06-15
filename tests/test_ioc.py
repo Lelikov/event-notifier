@@ -24,6 +24,7 @@ ENV = {
     "UNISENDER_FROM_EMAIL": "noreply@example.com",
     "UNISENDER_TEMPLATE_IDS": '{"BOOKING_CREATED": "tmpl-1"}',
     "TELEGRAM_BOT_TOKEN": "token",
+    "NOTIFIER_ADMIN_TOKEN": "dev-admin-token",
 }
 
 

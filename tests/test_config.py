@@ -11,6 +11,7 @@ REQUIRED = {
     "unisender_api_key": "key",
     "unisender_from_email": "noreply@example.com",
     "telegram_bot_token": "token",
+    "notifier_admin_token": "dev-admin-token",
 }
 
 

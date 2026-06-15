@@ -82,5 +82,8 @@ class Settings(BaseSettings):
 
     bindings_cache_ttl_seconds: int = 30
 
+    notifier_admin_token: str = Field(strict=True)
+    unisender_template_list_ttl_seconds: int = 3600
+
     fcm_project_id: str | None = None
     fcm_service_account_json: str | None = None

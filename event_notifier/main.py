@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from dishka import make_async_container
+from dishka.integrations.fastapi import FastapiProvider, setup_dishka
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
 
@@ -17,6 +18,7 @@ from event_notifier.config import Settings
 from event_notifier.db.repository import NotificationRepository
 from event_notifier.ioc import AppProvider
 from event_notifier.logger import setup_logger
+from event_notifier.routes_admin import router as admin_router
 from event_notifier.telemetry import instrument_asyncpg, instrument_fastapi, setup_tracing
 
 if TYPE_CHECKING:
@@ -24,10 +26,14 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# Container created at module level so setup_dishka can use it before lifespan.
+# It is started lazily (providers resolve on first get()) and closed in lifespan shutdown.
+_container = make_async_container(AppProvider(), FastapiProvider())
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    container = make_async_container(AppProvider())
+    container = _container
 
     settings = await container.get(Settings)
     log_level = getLevelNamesMapping().get(settings.log_level.upper(), 20)
@@ -83,6 +89,8 @@ app = FastAPI(title="event-notifier", version="0.4.0", lifespan=lifespan)
 setup_tracing()
 instrument_fastapi(app)
 instrument_asyncpg()
+setup_dishka(container=_container, app=app)
+app.include_router(admin_router)
 
 
 async def _collect_health_checks(application: FastAPI) -> dict[str, bool]:
