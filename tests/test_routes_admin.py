@@ -64,6 +64,7 @@ class _FakeRepo:
         self,
         *,
         trigger_event: str,
+        recipient_role: str,
         channel: str,
         enabled: bool,
         unisender_template_id: str | None,
@@ -72,6 +73,7 @@ class _FakeRepo:
         self.upserted.append(
             {
                 "trigger_event": trigger_event,
+                "recipient_role": recipient_role,
                 "channel": channel,
                 "enabled": enabled,
                 "unisender_template_id": unisender_template_id,
@@ -252,7 +254,7 @@ class TestPutConfig:
         bindings: _FakeBindings,
     ) -> None:
         response = await client.put(
-            "/api/notifications/config/BOOKING_CREATED/email",
+            "/api/notifications/config/BOOKING_CREATED/client/email",
             json={"enabled": True, "unisender_template_id": "tmpl-uuid-1"},
             headers=auth_headers,
         )
@@ -260,6 +262,7 @@ class TestPutConfig:
         assert response.json() == {"status": "ok"}
         assert len(repo.upserted) == 1
         assert repo.upserted[0]["trigger_event"] == "BOOKING_CREATED"
+        assert repo.upserted[0]["recipient_role"] == "client"
         assert repo.upserted[0]["unisender_template_id"] == "tmpl-uuid-1"
         assert bindings.invalidated is True
 
@@ -271,17 +274,18 @@ class TestPutConfig:
         bindings: _FakeBindings,
     ) -> None:
         response = await client.put(
-            "/api/notifications/config/BOOKING_CREATED/telegram",
+            "/api/notifications/config/BOOKING_CREATED/organizer/telegram",
             json={"enabled": True, "telegram_body": "Привет, {{ client_name }}!"},
             headers=auth_headers,
         )
         assert response.status_code == 200
         assert bindings.invalidated is True
+        assert repo.upserted[0]["recipient_role"] == "organizer"
         assert repo.upserted[0]["telegram_body"] == "Привет, {{ client_name }}!"
 
     async def test_invalid_jinja_returns_400(self, client: AsyncClient, auth_headers: dict) -> None:
         response = await client.put(
-            "/api/notifications/config/BOOKING_CREATED/telegram",
+            "/api/notifications/config/BOOKING_CREATED/client/telegram",
             json={"enabled": True, "telegram_body": "{{ unclosed"},
             headers=auth_headers,
         )
@@ -290,12 +294,21 @@ class TestPutConfig:
 
     async def test_unknown_channel_returns_400(self, client: AsyncClient, auth_headers: dict) -> None:
         response = await client.put(
-            "/api/notifications/config/BOOKING_CREATED/push",
+            "/api/notifications/config/BOOKING_CREATED/client/push",
             json={"enabled": True},
             headers=auth_headers,
         )
         assert response.status_code == 400
         assert "unknown channel" in response.json()["detail"]
+
+    async def test_unknown_role_returns_400(self, client: AsyncClient, auth_headers: dict) -> None:
+        response = await client.put(
+            "/api/notifications/config/BOOKING_CREATED/admin/email",
+            json={"enabled": True},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+        assert "unknown role" in response.json()["detail"]
 
 
 class TestUnisenderTemplates:

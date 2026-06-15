@@ -20,6 +20,7 @@ router = APIRouter(
 )
 
 _CHANNELS = {"email", "telegram"}
+_ROLES = {"client", "organizer"}
 
 _SAMPLE = {
     "client_name": "Иван",
@@ -48,15 +49,18 @@ async def get_config(repo: FromDishka[NotificationRepository]) -> dict[str, Any]
     return {"bindings": await repo.list_bindings()}
 
 
-@router.put("/config/{trigger_event}/{channel}")
+@router.put("/config/{trigger_event}/{recipient_role}/{channel}")
 async def put_config(
     trigger_event: str,
+    recipient_role: str,
     channel: str,
     body: BindingIn,
     repo: FromDishka[NotificationRepository],
     bindings: FromDishka[BindingsProvider],
 ) -> dict[str, str]:
     """Upsert a notification binding; invalidates the in-process bindings cache."""
+    if recipient_role not in _ROLES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unknown role")
     if channel not in _CHANNELS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unknown channel")
     if channel == "telegram" and body.telegram_body:
@@ -66,6 +70,7 @@ async def put_config(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid jinja: {exc}") from exc
     await repo.upsert_binding(
         trigger_event=trigger_event,
+        recipient_role=recipient_role,
         channel=channel,
         enabled=body.enabled,
         unisender_template_id=body.unisender_template_id,
