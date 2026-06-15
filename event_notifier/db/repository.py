@@ -190,6 +190,33 @@ class NotificationRepository:
         )
         logger.info("Cleaned up processed_events", older_than_days=days)
 
+    async def list_bindings(self) -> list[dict]:
+        rows = await self._sql.fetch_all(
+            "SELECT trigger_event, channel, enabled, unisender_template_id, telegram_body, updated_at "
+            "FROM notification_bindings ORDER BY trigger_event, channel",
+            {},
+        )
+        return [dict(r) for r in rows]
+
+    async def upsert_binding(
+        self,
+        *,
+        trigger_event: str,
+        channel: str,
+        enabled: bool,
+        unisender_template_id: str | None,
+        telegram_body: str | None,
+    ) -> None:
+        await self._sql.execute(
+            "INSERT INTO notification_bindings "
+            "(trigger_event, channel, enabled, unisender_template_id, telegram_body, updated_at) "
+            "VALUES (:t, :c, :en, :uid, :tb, now()) "
+            "ON CONFLICT (trigger_event, channel) DO UPDATE SET "
+            "enabled = excluded.enabled, unisender_template_id = excluded.unisender_template_id, "
+            "telegram_body = excluded.telegram_body, updated_at = now()",
+            {"t": trigger_event, "c": channel, "en": enabled, "uid": unisender_template_id, "tb": telegram_body},
+        )
+
     async def healthcheck(self) -> bool:
         row = await self._sql.fetch_one("SELECT 1 AS ok", {})
         return row is not None

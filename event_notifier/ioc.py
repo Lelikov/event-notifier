@@ -14,6 +14,7 @@ from event_notifier.adapters.consumer import NotificationConsumer
 from event_notifier.adapters.outbox_sender import OutboxSender
 from event_notifier.adapters.result_publisher import DeliveryResultPublisher
 from event_notifier.adapters.sql import SqlExecutor
+from event_notifier.adapters.unisender_templates import UnisenderTemplateList
 from event_notifier.application.use_cases.process_notification_command import ProcessNotificationCommandUseCase
 from event_notifier.config import Settings
 from event_notifier.db.repository import NotificationRepository
@@ -59,6 +60,19 @@ class AppProvider(Provider):
     @provide(scope=Scope.APP)
     def provide_bindings_provider(self, sql: ISqlExecutor, settings: Settings) -> BindingsProvider:
         return BindingsProvider(sql=sql, ttl_seconds=settings.bindings_cache_ttl_seconds)
+
+    @provide(scope=Scope.APP)
+    async def provide_unisender_template_list(self, settings: Settings) -> AsyncGenerator[UnisenderTemplateList]:
+        async with AsyncClient(
+            timeout=_HTTP_TIMEOUT,
+            headers={"X-API-KEY": settings.unisender_api_key},
+        ) as client:
+            yield UnisenderTemplateList(
+                http_client=client,
+                base_url=settings.unisender_base_url,
+                api_key=settings.unisender_api_key,
+                ttl_seconds=settings.unisender_template_list_ttl_seconds,
+            )
 
     @provide(scope=Scope.APP)
     def provide_exchange(self, settings: Settings) -> RabbitExchange:
