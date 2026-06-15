@@ -113,15 +113,20 @@ logged and never retried (the notification itself is already delivered).
 ### UniSender Go
 - `POST https://go.unisender.ru/ru/transactional/api/v1/email/send.json`
 - API key in `X-API-KEY` header (never in body, never logged)
-- `message.template_id` = real template UUID from `UNISENDER_TEMPLATE_IDS[locale][trigger_event]`
-  (recipient locale from `template_context["locale"]`, fallback `DEFAULT_LOCALE`)
+- `message.template_id` = template UUID read from `notification_bindings.unisender_template_id`
+  at runtime (via `BindingsProvider`; v1 is single-locale — the `DEFAULT_LOCALE` seed)
 - `message.global_substitutions` = flat scalar key/values only (nested structures dropped)
+
+The admin API also calls:
+- `POST https://go.unisender.ru/ru/transactional/api/v1/template/list.json` — to populate the
+  UniSender template dropdown; response cached in-memory with a 1 h TTL
+  (`UNISENDER_TEMPLATE_LIST_TTL_SECONDS`); `?refresh=true` bypasses the cache.
 
 ### Telegram Bot API
 - `POST https://api.telegram.org/bot{token}/sendMessage`
-- `{"chat_id", "text", "parse_mode": "HTML"}`; text rendered from
-  `templates/<locale>/telegram/<TRIGGER_EVENT>.j2` (autoescaped; recipient locale with
-  fallback to `DEFAULT_LOCALE`, `ru` and `en` sets shipped)
+- `{"chat_id", "text", "parse_mode": "HTML"}`; text is the `telegram_body` field from
+  `notification_bindings`, rendered at delivery time with Jinja2 `SandboxedEnvironment`
+  (from-string; `autoescape=False`; sandbox blocks unsafe attribute access)
 
 ### Trigger-specific notes
 - `BOOKING_REJECTED_BLACKLISTED` (booking rejected because the client matched the
@@ -133,11 +138,24 @@ logged and never retried (the notification itself is already delivered).
 
 ## HTTP Endpoints
 
+### Operational
+
 | Method | Path | Response |
 |--------|------|----------|
 | GET | `/health` | Liveness probe (k8s `livenessProbe`): always 200 `{"status":"ok"}`; no dependency calls |
 | GET | `/ready` | Readiness probe (k8s `readinessProbe`): 200 `{"status":"ready","checks":{...}}` / 503 `{"status":"not_ready","checks":{...}}` — checks: consumer, outbox_sender, database |
 | GET | `/metrics` | Prometheus exposition (`prometheus_client.generate_latest`): 200, `text/plain; version=0.0.4` |
+
+### Admin API (`/api/notifications/*`)
+
+Auth: `Authorization: Bearer <NOTIFIER_ADMIN_TOKEN>` — static service token, constant-time compare; 401 without it.
+
+| Method | Path | Request body | Response |
+|--------|------|-------------|----------|
+| GET | `/api/notifications/config` | — | `{"bindings": [{trigger_event, channel, enabled, unisender_template_id, telegram_body, updated_at}, ...]}` — all 14 rows |
+| PUT | `/api/notifications/config/{trigger_event}/{channel}` | `{"enabled": bool, "unisender_template_id": str\|null, "telegram_body": str\|null}` | `{"status": "ok"}` — upserts the row, validates Jinja2 for telegram channel, invalidates `BindingsProvider` cache; 400 on invalid Jinja2 or unknown channel |
+| GET | `/api/notifications/unisender-templates` | — | `{"templates": [{"id": "...", "name": "..."}]}` — cached list; `?refresh=true` forces a live fetch |
+| POST | `/api/notifications/telegram/preview` | `{"telegram_body": "...", "sample_data": {...}\|null}` | `{"rendered": "..."}` — renders the template with sample data (defaults provided if `sample_data` is null); 400 on render error |
 
 ### Exposed metrics (`metrics.py`)
 

@@ -59,21 +59,25 @@ OutboxSender (adapters/outbox_sender.py)
 
 | Layer | Path | Responsibility |
 |---|---|---|
-| Entry point | `main.py` | FastAPI lifespan: consumer, outbox-sender task, processed_events TTL loop, `/health` (liveness) + `/ready` (readiness checks) |
-| DI | `ioc.py` | Dishka `AppProvider` (APP scope; per-operation sessions via sessionmaker) |
-| Config | `config.py` | `pydantic-settings`; `DATABASE_URL` must be `postgresql+asyncpg://` |
+| Entry point | `main.py` | FastAPI lifespan: consumer, outbox-sender task, processed_events TTL loop, `/health` (liveness) + `/ready` (readiness checks); admin router registered |
+| DI | `ioc.py` | Dishka `AppProvider` (APP scope; per-operation sessions via sessionmaker); provides `BindingsProvider`, `UnisenderTemplateList` |
+| Config | `config.py` | `pydantic-settings`; `DATABASE_URL` must be `postgresql+asyncpg://`; `NOTIFIER_ADMIN_TOKEN`, `BINDINGS_CACHE_TTL_SECONDS` (default 30), `UNISENDER_TEMPLATE_LIST_TTL_SECONDS` (default 3600) |
 | DB models | `db/models.py` | ORM only for Alembic autogenerate (not used for queries) |
-| Repository | `db/repository.py` | raw `text()` SQL: atomic claim+write, SKIP LOCKED batch claim, reaper, retry/fail marks |
+| Repository | `db/repository.py` | raw `text()` SQL: atomic claim+write, SKIP LOCKED batch claim, reaper, retry/fail marks, `list_bindings()`, `upsert_binding()` |
 | SQL executor | `adapters/sql.py` | fresh `AsyncSession` per operation; `transaction()` for atomic units |
-| Domain | `domain/models/notification.py`, `domain/localization.py` | frozen DTOs; pure per-recipient time localization |
-| Use case | `application/use_cases/process_notification_command.py` | contact resolution → outbox write |
+| Domain | `domain/models/notification.py`, `domain/models/binding.py`, `domain/localization.py` | frozen DTOs; `NotificationBinding` DTO; pure per-recipient time localization |
+| Bindings provider | `adapters/bindings_provider.py` | `BindingsProvider(sql, ttl_seconds)` — in-memory TTL cache of `notification_bindings`; `get(trigger_event, channel)` / `invalidate()` |
+| Use case | `application/use_cases/process_notification_command.py` | contact resolution → outbox write; skips channels whose binding is disabled |
 | Consumer | `adapters/consumer.py` | FastStream subscriber (raw message via Context), ack policy, DLX topology |
 | Outbox sender | `adapters/outbox_sender.py` | polling, permanent/transient classification, result publishing |
 | Result publisher | `adapters/result_publisher.py` | fire-and-forget `notification.*.message_sent` POST |
+| Admin auth | `admin_auth.py` | `require_admin_token` FastAPI dependency (Bearer token, constant-time compare) |
+| Admin routes | `routes_admin.py` | `DishkaRoute` router under `/api/notifications` — config GET/PUT, UniSender template list, Telegram preview |
+| UniSender templates | `adapters/unisender_templates.py` | `UnisenderTemplateList` — in-memory TTL cache of `POST .../template/list.json` |
 | Interfaces | `interfaces/` | `INotificationChannel`, `IUsersClient`, `ISqlExecutor`, `INotificationRepository`, `IDeliveryResultPublisher` protocols |
 | Metrics | `metrics.py` | Prometheus: consumer RED (`messages_processed_total{queue,event_type,outcome}`, `message_processing_seconds{queue}`), `notifier_deliveries_total{channel,trigger,outcome}`, `notifier_outbox_depth{status}` + `notifier_outbox_oldest_pending_age_seconds` gauges (refreshed by the outbox loop); served at `GET /metrics` |
-| Channels | `infrastructure/channels/` | UniSender Go, Telegram, FCM (unregistered) |
-| Templates | `event_notifier/templates/<locale>/telegram/` | Jinja2 message bodies (one file per TriggerEvent per locale; `ru` default, `en` shipped) |
+| Channels | `infrastructure/channels/` | UniSender Go, Telegram (both read templates from `BindingsProvider`), FCM (unregistered) |
+| Templates | `event_notifier/templates/<locale>/telegram/` | Jinja2 source files used only as the alembic migration-003 seed; DB is authoritative at runtime |
 
 ### Adding a New Channel
 
@@ -86,18 +90,47 @@ OutboxSender (adapters/outbox_sender.py)
 4. Add templates (config-driven ids or `templates/` files — user-facing text never lives in code).
 5. Map the channel in `result_publisher._CHANNEL_TO_EVENT_TYPE` for delivery results.
 
+### Notification Bindings + Admin API
+
+`notification_bindings` (PK `(trigger_event, channel)`) stores admin-managed channel
+enablement and template config. Seeded by migration `003_notification_bindings` from
+`UNISENDER_TEMPLATE_IDS` env and repo `.j2` files (default locale); the DB is authoritative
+at runtime.
+
+`BindingsProvider` caches the table in memory with a TTL (`BINDINGS_CACHE_TTL_SECONDS`,
+default 30 s). A channel fires only when its binding is `enabled = true` AND the recipient
+has a contact for it. `EmailChannel` reads `unisender_template_id`; `TelegramChannel`
+renders `telegram_body` with Jinja2 `SandboxedEnvironment` (from-string).
+
+Admin API — prefix `/api/notifications`, auth `Authorization: Bearer <NOTIFIER_ADMIN_TOKEN>`:
+
+| Endpoint | Action |
+|----------|--------|
+| `GET /config` | list all bindings |
+| `PUT /config/{trigger_event}/{channel}` | upsert binding, validate Jinja2, invalidate cache |
+| `GET /unisender-templates[?refresh=]` | cached UniSender template list |
+| `POST /telegram/preview` | render a telegram body with sample data |
+
+v1 caveat: single-locale (seeded from `DEFAULT_LOCALE`). Per-locale management and push
+channel are out of scope.
+
 ### Hard External Contracts (do not change)
 
 - **UniSender Go**: `POST /ru/transactional/api/v1/email/send.json`, API key in `X-API-KEY`
-  header, `message.template_id` = provisioned template UUID, flat `global_substitutions`.
-- **Telegram Bot API**: `POST /bot{token}/sendMessage` with `chat_id`/`text`/`parse_mode`.
+  header, `message.template_id` = UUID from `notification_bindings`, flat `global_substitutions`.
+  Also `POST .../template/list.json` (admin template dropdown).
+- **Telegram Bot API**: `POST /bot{token}/sendMessage` with `chat_id`/`text`/`parse_mode`;
+  text rendered from `notification_bindings.telegram_body` at delivery time.
 
 ### Required Environment Variables
 
 See `.env.example`. Required: `DATABASE_URL` (asyncpg), `EVENT_USERS_URL`,
-`EVENT_USERS_TOKEN`, `UNISENDER_API_KEY`, `UNISENDER_FROM_EMAIL`, `TELEGRAM_BOT_TOKEN`.
+`EVENT_USERS_TOKEN`, `UNISENDER_API_KEY`, `UNISENDER_FROM_EMAIL`, `TELEGRAM_BOT_TOKEN`,
+`NOTIFIER_ADMIN_TOKEN` (static service token for `/api/notifications/*`).
 Optional: `EVENTS_ENDPOINT_URL`/`EVENTS_API_KEY` (delivery results),
-`UNISENDER_TEMPLATE_IDS` (JSON dict, locale-keyed or flat), `DEFAULT_LOCALE` (default `ru`),
+`UNISENDER_TEMPLATE_IDS` (JSON dict, locale-keyed or flat — migration seed only),
+`DEFAULT_LOCALE` (default `ru`), `BINDINGS_CACHE_TTL_SECONDS` (default 30),
+`UNISENDER_TEMPLATE_LIST_TTL_SECONDS` (default 3600),
 `CONSUMER_PREFETCH_COUNT`, `GRACEFUL_TIMEOUT`, FCM vars.
 
 ### Test Approach

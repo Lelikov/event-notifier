@@ -61,14 +61,48 @@ which opens a fresh `AsyncSession` per operation (safe across concurrent tasks) 
 exposes `transaction()` for multi-statement atomic units.
 
 Tables: `processed_events` (idempotency, 7-day TTL cleanup loop), `notification_outbox`
-(status: pending/processing/delivered/failed, enforced by CHECK constraint).
+(status: pending/processing/delivered/failed, enforced by CHECK constraint),
+`notification_bindings` (admin-managed per-trigger-event channel config — see below).
+
+## Notification Bindings (admin-managed config)
+
+`notification_bindings` — composite PK `(trigger_event, channel)` — stores which channels
+are enabled per `TriggerEvent` and the template to use:
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `trigger_event` | TEXT | `TriggerEvent` value, e.g. `BOOKING_CREATED` |
+| `channel` | TEXT | `email` or `telegram` |
+| `enabled` | BOOLEAN | controls whether this channel fires for this trigger |
+| `unisender_template_id` | TEXT \| NULL | UniSender Go template UUID (email rows) |
+| `telegram_body` | TEXT \| NULL | Jinja2 template string rendered at runtime (telegram rows) |
+| `updated_at` | TIMESTAMPTZ | set by admin API on each write |
+
+**Seeding (migration `003_notification_bindings`):** the table is populated once at
+`alembic upgrade head` from the `UNISENDER_TEMPLATE_IDS` env (default-locale email UUIDs)
+and the repo's `templates/<locale>/telegram/<TRIGGER>.j2` files (telegram bodies). After
+seeding the DB is authoritative; the `.j2` files serve only as the seed source.
+
+**Runtime reads — `BindingsProvider`:** a short in-memory TTL cache (default 30 s,
+`BINDINGS_CACHE_TTL_SECONDS`) avoids per-delivery DB round-trips. `get(trigger_event,
+channel)` refreshes from `notification_bindings` on the first call after expiry;
+`invalidate()` forces an immediate refresh (called by the admin API after each `PUT`).
+
+**Enablement semantics:** a channel fires for a trigger only when its binding is
+`enabled = true` AND the recipient has a contact for that channel (email address or
+`telegram_chat_id`). Either condition alone is not sufficient.
+
+**Template rendering:** `EmailChannel` reads `unisender_template_id` from the binding and
+passes it to UniSender Go. `TelegramChannel` renders `telegram_body` with Jinja2
+`SandboxedEnvironment` (from-string, `autoescape=False`; the sandbox blocks unsafe attribute
+access).
 
 ## Channels
 
 | Channel | Provider | Template mechanism |
 |---------|----------|--------------------|
-| Email | UniSender Go transactional API | `UNISENDER_TEMPLATE_IDS` config maps locale -> TriggerEvent value -> template UUID (flat legacy form = default locale); flat scalar `global_substitutions` |
-| Telegram | Telegram Bot API `/sendMessage` | Jinja2 file per locale and trigger: `event_notifier/templates/<locale>/telegram/<TRIGGER_EVENT>.j2` (ru + en shipped) |
+| Email | UniSender Go transactional API | `unisender_template_id` from `notification_bindings` (runtime); flat scalar `global_substitutions` |
+| Telegram | Telegram Bot API `/sendMessage` | `telegram_body` from `notification_bindings`, rendered with Jinja2 `SandboxedEnvironment` |
 | Push (not registered) | FCM HTTP v1 | `_PUSH_TITLES` map; enable in `ioc.py` once FCM credentials exist |
 
 All channels classify failures into `DeliveryResult.retryable`:
@@ -90,28 +124,53 @@ fallback to `DEFAULT_LOCALE` (default `ru`).
 `GET /health` returns 200/503 with per-check booleans: consumer started, outbox-sender
 task alive, database reachable.
 
+## Admin API
+
+Prefix: `/api/notifications`. Auth: `Authorization: Bearer <NOTIFIER_ADMIN_TOKEN>` (static
+service token, compared constant-time; distinct from end-user channels). All endpoints
+require the token — 401 otherwise.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/notifications/config` | Return all rows from `notification_bindings` |
+| PUT | `/api/notifications/config/{trigger_event}/{channel}` | Upsert a binding (validates Jinja2 for telegram; invalidates the `BindingsProvider` cache) |
+| GET | `/api/notifications/unisender-templates` | Cached list from UniSender Go `POST .../template/list.json` (`?refresh=true` to force); in-memory TTL default 1 h (`UNISENDER_TEMPLATE_LIST_TTL_SECONDS`) |
+| POST | `/api/notifications/telegram/preview` | Render a Jinja2 `telegram_body` with sample data; validates template syntax |
+
+**PUT body (`BindingIn`):**
+
+```json
+{"enabled": true, "unisender_template_id": "<uuid or null>", "telegram_body": "<jinja or null>"}
+```
+
+Returns `{"status": "ok"}` on success; 400 with `"detail"` string on invalid Jinja2 or unknown channel.
+
 ## Environment Variables
 
 ```
-RABBIT_URL                  # default amqp://guest:guest@localhost:5672/
-RABBIT_EXCHANGE             # default "events"; queue name/args fixed by event_schemas.queues
-CONSUMER_PREFETCH_COUNT     # per-channel QoS, default 10
-GRACEFUL_TIMEOUT            # broker graceful shutdown, default 30s
-DATABASE_URL                # postgresql+asyncpg:// (required)
-EVENT_USERS_URL             # required
-EVENT_USERS_TOKEN           # required (Bearer)
-EVENTS_ENDPOINT_URL         # optional; unset disables delivery-result publishing
-EVENTS_API_KEY              # auth for EVENTS_ENDPOINT_URL
-UNISENDER_API_KEY           # required (sent as X-API-KEY header, never in body)
-UNISENDER_FROM_EMAIL        # required
-UNISENDER_FROM_NAME         # default "Notifications"
-UNISENDER_TEMPLATE_IDS      # JSON dict: locale -> {TriggerEvent value -> UniSender template UUID}
-                            # (legacy flat {TriggerEvent: UUID} form = default locale)
-DEFAULT_LOCALE              # default template language, default "ru"
-TELEGRAM_BOT_TOKEN          # required
-FCM_PROJECT_ID              # optional (PushChannel not registered)
-FCM_SERVICE_ACCOUNT_JSON    # optional
-DEBUG / LOG_LEVEL           # logging
+RABBIT_URL                      # default amqp://guest:guest@localhost:5672/
+RABBIT_EXCHANGE                 # default "events"; queue name/args fixed by event_schemas.queues
+CONSUMER_PREFETCH_COUNT         # per-channel QoS, default 10
+GRACEFUL_TIMEOUT                # broker graceful shutdown, default 30s
+DATABASE_URL                    # postgresql+asyncpg:// (required)
+EVENT_USERS_URL                 # required
+EVENT_USERS_TOKEN               # required (Bearer)
+EVENTS_ENDPOINT_URL             # optional; unset disables delivery-result publishing
+EVENTS_API_KEY                  # auth for EVENTS_ENDPOINT_URL
+UNISENDER_API_KEY               # required (sent as X-API-KEY header, never in body)
+UNISENDER_FROM_EMAIL            # required
+UNISENDER_FROM_NAME             # default "Notifications"
+UNISENDER_TEMPLATE_IDS          # JSON dict: locale -> {TriggerEvent value -> UniSender template UUID}
+                                # (legacy flat {TriggerEvent: UUID} form = default locale)
+                                # Used only as the migration-time seed; DB is authoritative at runtime
+DEFAULT_LOCALE                  # default template language, default "ru"
+TELEGRAM_BOT_TOKEN              # required
+NOTIFIER_ADMIN_TOKEN            # required; static service token for /api/notifications/* admin API
+BINDINGS_CACHE_TTL_SECONDS      # BindingsProvider in-memory cache TTL, default 30
+UNISENDER_TEMPLATE_LIST_TTL_SECONDS  # UniSender template list cache TTL, default 3600
+FCM_PROJECT_ID                  # optional (PushChannel not registered)
+FCM_SERVICE_ACCOUNT_JSON        # optional
+DEBUG / LOG_LEVEL               # logging
 ```
 
 ## Tracing
@@ -125,3 +184,7 @@ OpenTelemetry auto-instrumentation (FastAPI, httpx, asyncpg, RabbitMQ via FastSt
 2. **Operator redrive of `failed` rows is manual SQL** —
    `UPDATE notification_outbox SET status='pending', retry_count=0 WHERE status='failed' AND ...`.
 3. **No metrics** — observability is structured logs only.
+4. **Single-locale bindings (v1)** — `notification_bindings` holds one template per
+   `trigger_event × channel`; the seeded locale is the `DEFAULT_LOCALE` (default `ru`).
+   Per-locale management, a named template library for Telegram, and a push channel
+   are out of scope for v1.
